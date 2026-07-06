@@ -49,9 +49,16 @@ class PluginAPI:
         description: str = "",
         aliases: tuple[str, ...] | list[str] = (),
         level: str = "user",
+        options: tuple[Any, ...] | list[Any] = (),
     ) -> Callable[[PluginHandler], PluginHandler]:
         def decorator(handler: PluginHandler) -> PluginHandler:
-            spec = command_spec(name, description=description, aliases=aliases, level=level)
+            spec = command_spec(
+                name,
+                description=description,
+                aliases=aliases,
+                level=level,
+                options=options,
+            )
 
             async def callback(ctx: commands.Context, args: str = "") -> None:
                 await handler(ctx, args)

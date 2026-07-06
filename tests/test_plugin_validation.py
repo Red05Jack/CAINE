@@ -1,4 +1,4 @@
-from caine.plugin_validation import validate_plugin_source
+from caine.plugin_validation import normalize_plugin_command_source, validate_plugin_source
 
 
 VALID_PLUGIN = """
@@ -36,6 +36,33 @@ async def setup_plugin(api):
 
     assert result.ok
     assert result.command_names == ["dice"]
+
+
+def test_command_names_and_options_are_normalized():
+    source = """
+PLUGIN = {"name": "rank", "description": "Rank tools."}
+
+
+async def setup_plugin(api):
+    @api.command({
+        "names": ["set-rank-Color", "set-rank-color", "set-rank-Colour"],
+        "description": "Set color.",
+        "level": "user",
+        "options": [
+            {"name": "Target User", "description": "Target.", "type": "member", "required": False}
+        ]
+    })
+    async def color(ctx, args):
+        await api.reply(ctx, "ok")
+"""
+
+    result = validate_plugin_source(source)
+    normalized = normalize_plugin_command_source(source)
+
+    assert result.ok
+    assert result.command_names == ["set-rank-color", "set-rank-colour"]
+    assert '"names": ["set-rank-color", "set-rank-colour"]' in normalized
+    assert '"type": "user"' in normalized
 
 
 def test_banned_import_fails():

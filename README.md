@@ -25,6 +25,10 @@ erst nach Admin-Freigabe geladen.
 
 Alle Core- und Plugin-Commands werden aus Command-Objekten registriert. Dasselbe
 Objekt erzeugt den Prefix-Command mit `!` und den Slash-Command mit `/`.
+Slash-Optionen stehen ebenfalls im Command-Objekt. Ohne `options` bekommt ein
+Slash-Command keine kuenstliche Textoption; mit `options` werden echte Discord-
+Typen wie `string`, `integer`, `boolean`, `user`, `channel`, `role` oder
+`attachment` registriert.
 
 Command-Stufen:
 
@@ -36,8 +40,9 @@ Command-Stufen:
 fuer die seine Stufe ausreicht. Stufenlabels wie `[S1]`, `[S2]` und `[S3]`
 werden nur Nutzern mit Kinger-/Master-Rolle angezeigt.
 
-Slash-Commands werden global und zusaetzlich pro Server synchronisiert, damit
-neue `/`-Befehle nicht erst nach Discords globaler Wartezeit sichtbar werden.
+Slash-Commands werden entweder serverbezogen oder global synchronisiert. Wenn
+Guild-IDs bekannt sind, nutzt C.A.I.N.E. die schnelle serverbezogene Sync und
+raeumt alte globale Slash-Commands auf, damit Discord sie nicht doppelt zeigt.
 
 Die Default-Kinger-Rolle steht in `command_permissions.json`:
 

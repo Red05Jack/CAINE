@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import json
 import logging
+import inspect
+import re
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import discord
@@ -25,11 +28,20 @@ class CommandLevel(str, Enum):
 
 
 @dataclass(frozen=True)
+class CommandOption:
+    name: str
+    description: str
+    type: str = "string"
+    required: bool = False
+
+
+@dataclass(frozen=True)
 class CommandSpec:
     names: tuple[str, ...]
     description: str
     level: CommandLevel = CommandLevel.USER
     group: str = "Plugins"
+    options: tuple[CommandOption, ...] = ()
 
     @property
     def name(self) -> str:
@@ -49,6 +61,7 @@ def command_spec(
     level: str | CommandLevel = CommandLevel.USER,
     aliases: tuple[str, ...] | list[str] = (),
     group: str = "Plugins",
+    options: tuple[CommandOption, ...] | list[CommandOption | dict[str, Any]] = (),
 ) -> CommandSpec:
     if isinstance(name_or_object, CommandSpec):
         return name_or_object
@@ -62,10 +75,11 @@ def command_spec(
         description = str(name_or_object.get("description", description)).strip()
         level = name_or_object.get("level", level)
         group = str(name_or_object.get("group", group)).strip() or group
+        options = name_or_object.get("options", options)
     else:
         names = (str(name_or_object).strip(), *(str(item).strip() for item in aliases if str(item).strip()))
 
-    names = tuple(dict.fromkeys(name for name in names if name))
+    names = tuple(dict.fromkeys(normalize_command_name(name) for name in names if normalize_command_name(name)))
     if not names:
         raise ValueError("command spec needs at least one name")
 
@@ -74,7 +88,74 @@ def command_spec(
         description=description.strip() or "No description.",
         level=normalize_command_level(level),
         group=group,
+        options=normalize_command_options(options),
     )
+
+
+def normalize_command_name(value: str) -> str:
+    normalized = str(value).strip().lower()
+    normalized = normalized.replace(" ", "-")
+    normalized = re.sub(r"[^a-z0-9_-]+", "-", normalized)
+    normalized = re.sub(r"[-_]{2,}", "-", normalized).strip("-_")
+    return normalized[:32]
+
+
+def normalize_option_name(value: str) -> str:
+    normalized = normalize_command_name(value).replace("-", "_")
+    return normalized[:32]
+
+
+def normalize_command_options(
+    options: tuple[CommandOption, ...] | list[CommandOption | dict[str, Any]],
+) -> tuple[CommandOption, ...]:
+    result: list[CommandOption] = []
+    seen: set[str] = set()
+    for option in options or ():
+        if isinstance(option, CommandOption):
+            candidate = option
+        else:
+            candidate = CommandOption(
+                name=str(option.get("name", "")),
+                description=str(option.get("description", "")),
+                type=str(option.get("type", "string")),
+                required=bool(option.get("required", False)),
+            )
+        name = normalize_option_name(candidate.name)
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        result.append(
+            CommandOption(
+                name=name,
+                description=(candidate.description or name)[:100],
+                type=normalize_option_type(candidate.type),
+                required=candidate.required,
+            )
+        )
+    return tuple(sorted(result, key=lambda item: not item.required))
+
+
+def normalize_option_type(value: str) -> str:
+    normalized = str(value).strip().lower()
+    aliases = {
+        "str": "string",
+        "text": "string",
+        "string": "string",
+        "int": "integer",
+        "integer": "integer",
+        "float": "number",
+        "num": "number",
+        "number": "number",
+        "bool": "boolean",
+        "boolean": "boolean",
+        "user": "user",
+        "member": "user",
+        "channel": "channel",
+        "role": "role",
+        "attachment": "attachment",
+        "file": "attachment",
+    }
+    return aliases.get(normalized, "string")
 
 
 def normalize_command_level(value: str | CommandLevel) -> CommandLevel:
@@ -149,10 +230,13 @@ def add_slash_command(
 ) -> list[app_commands.Command]:
     slash_commands = []
     for slash_name in spec.names:
-        async def callback(interaction: discord.Interaction, text: str = "") -> None:
+        async def callback(interaction: discord.Interaction, **kwargs: Any) -> None:
             if not await ensure_interaction_allowed(interaction, spec):
                 return
-            await handler(SlashCommandContext(interaction), text)
+            args, attachments = slash_kwargs_to_args(spec, kwargs)
+            await handler(SlashCommandContext(interaction, attachments=attachments), args)
+
+        configure_slash_callback(callback, spec)
 
         description = spec.description[:100] or "No description."
         slash_command = app_commands.Command(
@@ -166,6 +250,68 @@ def add_slash_command(
         bot.tree.add_command(slash_command)
         slash_commands.append(slash_command)
     return slash_commands
+
+
+def configure_slash_callback(callback: Callable[..., Awaitable[None]], spec: CommandSpec) -> None:
+    parameters = [
+        inspect.Parameter(
+            "interaction",
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            annotation=discord.Interaction,
+        )
+    ]
+    descriptions = {}
+    for option in spec.options:
+        default = inspect.Parameter.empty if option.required else None
+        parameters.append(
+            inspect.Parameter(
+                option.name,
+                inspect.Parameter.KEYWORD_ONLY,
+                annotation=slash_option_annotation(option.type),
+                default=default,
+            )
+        )
+        descriptions[option.name] = option.description
+    callback.__signature__ = inspect.Signature(parameters)  # type: ignore[attr-defined]
+    callback.__discord_app_commands_param_description__ = descriptions  # type: ignore[attr-defined]
+
+
+def slash_option_annotation(option_type: str) -> type:
+    return {
+        "string": str,
+        "integer": int,
+        "number": float,
+        "boolean": bool,
+        "user": discord.User,
+        "channel": discord.abc.GuildChannel,
+        "role": discord.Role,
+        "attachment": discord.Attachment,
+    }.get(option_type, str)
+
+
+def slash_kwargs_to_args(spec: CommandSpec, kwargs: dict[str, Any]) -> tuple[str, list[discord.Attachment]]:
+    parts: list[str] = []
+    attachments: list[discord.Attachment] = []
+    for option in spec.options:
+        value = kwargs.get(option.name)
+        if value is None:
+            continue
+        if option.type == "attachment" and isinstance(value, discord.Attachment):
+            attachments.append(value)
+            continue
+        parts.append(slash_value_to_arg(value))
+    return " ".join(part for part in parts if part).strip(), attachments
+
+
+def slash_value_to_arg(value: Any) -> str:
+    value_id = getattr(value, "id", None)
+    if value_id is not None and isinstance(value, (discord.User, discord.Member)):
+        return f"<@{value_id}>"
+    if value_id is not None and isinstance(value, discord.Role):
+        return f"<@&{value_id}>"
+    if value_id is not None and isinstance(value, discord.abc.GuildChannel):
+        return f"<#{value_id}>"
+    return str(value)
 
 
 def remove_slash_command(bot: commands.Bot, command_name: str) -> None:
@@ -272,12 +418,23 @@ def permission_denied_text(level: CommandLevel) -> str:
 
 
 class SlashCommandContext:
-    def __init__(self, interaction: discord.Interaction) -> None:
+    def __init__(
+        self,
+        interaction: discord.Interaction,
+        attachments: list[discord.Attachment] | None = None,
+    ) -> None:
         self.interaction = interaction
         self.bot = interaction.client
         self.author = interaction.user
         self.guild = interaction.guild
-        self.message = None
+        self.channel = interaction.channel
+        self.message = SimpleNamespace(
+            attachments=list(attachments or []),
+            author=self.author,
+            guild=self.guild,
+            channel=self.channel,
+            id=interaction.id,
+        )
 
     async def reply(self, content: str, mention_author: bool = False) -> None:
         await respond_to_interaction(self.interaction, content)
@@ -305,15 +462,30 @@ async def respond_to_interaction(
 
 
 async def sync_application_commands(bot: commands.Bot) -> None:
-    global_count: int | None = None
+    guild_ids = slash_sync_guild_ids(bot)
+    if guild_ids:
+        guild_counts = await sync_guild_application_commands(bot, guild_ids)
+        global_state = await clear_remote_global_commands(bot)
+        if not guild_counts and global_state != "cleared":
+            return
+        log.info(
+            "synced slash commands globally=%s guilds=%s",
+            global_state,
+            guild_counts or "none",
+        )
+        return
+
     try:
         synced = await bot.tree.sync()
-        global_count = len(synced)
     except Exception as exc:
-        log.warning("could not sync slash commands: %s", exc)
+        log.warning("could not sync slash commands globally: %s", exc)
+        return
+    log.info("synced slash commands globally=%s guilds=none", len(synced))
 
+
+async def sync_guild_application_commands(bot: commands.Bot, guild_ids: list[int]) -> dict[int, int]:
     guild_counts: dict[int, int] = {}
-    for guild_id in slash_sync_guild_ids(bot):
+    for guild_id in guild_ids:
         guild = discord.Object(id=guild_id)
         try:
             bot.tree.copy_global_to(guild=guild)
@@ -322,14 +494,26 @@ async def sync_application_commands(bot: commands.Bot) -> None:
             log.warning("could not sync slash commands for guild %s: %s", guild_id, exc)
             continue
         guild_counts[guild_id] = len(synced)
+    return guild_counts
 
-    if global_count is None and not guild_counts:
-        return
-    log.info(
-        "synced slash commands globally=%s guilds=%s",
-        global_count if global_count is not None else "failed",
-        guild_counts or "none",
-    )
+
+async def clear_remote_global_commands(bot: commands.Bot) -> str:
+    local_global_commands = list(bot.tree.get_commands(guild=None))
+    try:
+        bot.tree.clear_commands(guild=None)
+        await bot.tree.sync()
+    except Exception as exc:
+        log.warning("could not clear global slash commands: %s", exc)
+        return "clear-failed"
+    finally:
+        for command in local_global_commands:
+            try:
+                bot.tree.add_command(command)
+            except app_commands.CommandAlreadyRegistered:
+                continue
+            except Exception:
+                log.debug("could not restore local slash command %s", command.name, exc_info=True)
+    return "cleared"
 
 
 def slash_sync_guild_ids(bot: commands.Bot) -> list[int]:

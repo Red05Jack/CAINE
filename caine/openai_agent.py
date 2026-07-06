@@ -512,8 +512,13 @@ class OpenAIAgent:
                 - Register commands with @api.command({
                   "names": ["command_name"],
                   "description": "...",
-                  "level": "user"
+                  "level": "user",
+                  "options": []
                   }).
+                - Add slash options only when the command truly needs input.
+                  Option objects are {"name": "...", "description": "...",
+                  "type": "string|integer|number|boolean|user|channel|role|attachment",
+                  "required": true|false}.
                 - Command levels are:
                   "kinger" for S1 Kinger-role-only commands,
                   "admin" for S2 Discord administrator commands,
@@ -551,8 +556,13 @@ class OpenAIAgent:
             - Register at least one command with @api.command({
               "names": ["command_name"],
               "description": "...",
-              "level": "user"
+              "level": "user",
+              "options": []
               }).
+            - Add slash options only when the command truly needs input.
+              Option objects are {"name": "...", "description": "...",
+              "type": "string|integer|number|boolean|user|channel|role|attachment",
+              "required": true|false}.
             - Command levels are:
               "kinger" for S1 Kinger-role-only commands,
               "admin" for S2 Discord administrator commands,

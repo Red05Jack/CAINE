@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import ast
+import json
 import re
 from dataclasses import dataclass, field
+
+from caine.command_system import normalize_command_name, normalize_option_name, normalize_option_type
 
 
 ALLOWED_IMPORTS = {
@@ -72,6 +75,7 @@ BANNED_NODE_TYPES = (
 
 COMMAND_NAME_RE = re.compile(r"^[a-z][a-z0-9_-]{1,31}$")
 COMMAND_LEVELS = {"kinger", "admin", "user", "s1", "s2", "s3"}
+COMMAND_OPTION_TYPES = {"string", "integer", "number", "boolean", "user", "channel", "role", "attachment"}
 
 
 @dataclass
@@ -93,6 +97,7 @@ class PluginValidationError(ValueError):
 
 
 def validate_plugin_source(source: str) -> ValidationResult:
+    source = normalize_plugin_command_source(source)
     errors: list[str] = []
     warnings: list[str] = []
     command_names: list[str] = []
@@ -165,6 +170,7 @@ def validate_plugin_source(source: str) -> ValidationResult:
                 command_level = _command_level_from_call(node)
                 if command_level is not None and command_level not in COMMAND_LEVELS:
                     errors.append(f"command level '{command_level}' is invalid")
+                errors.extend(_command_option_errors_from_call(node))
 
     if not command_names:
         errors.append("plugin must register at least one api.command(...)")
@@ -186,6 +192,23 @@ def validate_plugin_or_raise(source: str) -> ValidationResult:
     if not result.ok:
         raise PluginValidationError(result.summary())
     return result
+
+
+def normalize_plugin_command_source(source: str) -> str:
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return source
+
+    line_starts = _line_start_offsets(source)
+    replacements: list[tuple[int, int, str]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and _is_api_command_decorator(node):
+            replacements.extend(_normalization_replacements_for_call(node, line_starts))
+
+    for start, end, text in sorted(replacements, key=lambda item: item[0], reverse=True):
+        source = source[:start] + text + source[end:]
+    return source
 
 
 def extract_plugin_metadata(source_or_tree: str | ast.Module) -> dict[str, str]:
@@ -218,7 +241,7 @@ def _command_names_from_call(node: ast.Call) -> list[str] | None:
         return None
     first = node.args[0]
     if isinstance(first, ast.Constant) and isinstance(first.value, str):
-        return [first.value]
+        return _normalize_command_names([first.value])
     if isinstance(first, ast.Dict):
         return _command_names_from_dict(first)
     return [""]
@@ -243,11 +266,55 @@ def _command_names_from_dict(node: ast.Dict) -> list[str]:
         if not isinstance(key, ast.Constant):
             continue
         if key.value == "name" and isinstance(value, ast.Constant) and isinstance(value.value, str):
-            return [value.value]
+            return _normalize_command_names([value.value])
         if key.value == "names":
             names = _literal_string_sequence(value)
-            return names or [""]
+            return _normalize_command_names(names) or [""]
     return [""]
+
+
+def _normalize_command_names(names: list[str]) -> list[str]:
+    normalized = [normalize_command_name(name) for name in names]
+    return list(dict.fromkeys(name for name in normalized if name))
+
+
+def _command_option_errors_from_call(node: ast.Call) -> list[str]:
+    option_node = _command_options_node_from_call(node)
+    if option_node is None:
+        return []
+
+    records = _literal_option_dicts(option_node)
+    if records is None:
+        return ["command options must be a literal list of objects"]
+
+    errors: list[str] = []
+    seen_names: set[str] = set()
+    for record in records:
+        name = normalize_option_name(str(record.get("name", "")))
+        if not name:
+            errors.append("command option name is invalid")
+            continue
+        if name in seen_names:
+            continue
+        seen_names.add(name)
+        option_type = normalize_option_type(str(record.get("type", "string")))
+        if option_type not in COMMAND_OPTION_TYPES:
+            errors.append(f"command option '{name}' type is invalid")
+    return errors
+
+
+def _command_options_node_from_call(node: ast.Call) -> ast.AST | None:
+    for keyword in node.keywords:
+        if keyword.arg == "options":
+            return keyword.value
+
+    if not node.args or not isinstance(node.args[0], ast.Dict):
+        return None
+
+    for key, value in zip(node.args[0].keys, node.args[0].values):
+        if isinstance(key, ast.Constant) and key.value == "options":
+            return value
+    return None
 
 
 def _literal_string_sequence(node: ast.AST) -> list[str]:
@@ -264,5 +331,101 @@ def _literal_string_sequence(node: ast.AST) -> list[str]:
     return []
 
 
+def _literal_option_dicts(node: ast.AST) -> list[dict[str, object]] | None:
+    if not isinstance(node, (ast.List, ast.Tuple)):
+        return None
+
+    records: list[dict[str, object]] = []
+    for item in node.elts:
+        if not isinstance(item, ast.Dict):
+            return None
+        record: dict[str, object] = {}
+        for key, value in zip(item.keys, item.values):
+            if not isinstance(key, ast.Constant) or not isinstance(key.value, str):
+                continue
+            key_name = key.value
+            if key_name in {"name", "description", "type"} and isinstance(value, ast.Constant):
+                record[key_name] = str(value.value)
+            elif key_name == "required" and isinstance(value, ast.Constant):
+                record[key_name] = bool(value.value)
+        records.append(record)
+    return records
+
+
 def _is_api_command_decorator(node: ast.AST) -> bool:
     return isinstance(node, ast.Call) and _command_names_from_call(node) is not None
+
+
+def _normalization_replacements_for_call(
+    node: ast.Call,
+    line_starts: list[int],
+) -> list[tuple[int, int, str]]:
+    if not node.args:
+        return []
+
+    replacements: list[tuple[int, int, str]] = []
+    first = node.args[0]
+
+    if isinstance(first, ast.Constant) and isinstance(first.value, str):
+        names = _normalize_command_names([first.value])
+        if names and names[0] != first.value:
+            replacements.append(_node_replacement(first, line_starts, json.dumps(names[0])))
+        return replacements
+
+    if not isinstance(first, ast.Dict):
+        return replacements
+
+    for key, value in zip(first.keys, first.values):
+        if not isinstance(key, ast.Constant):
+            continue
+        if key.value == "name" and isinstance(value, ast.Constant) and isinstance(value.value, str):
+            names = _normalize_command_names([value.value])
+            if names and names[0] != value.value:
+                replacements.append(_node_replacement(value, line_starts, json.dumps(names[0])))
+        elif key.value == "names":
+            names = _literal_string_sequence(value)
+            normalized_names = _normalize_command_names(names)
+            if normalized_names and normalized_names != names:
+                replacements.append(_node_replacement(value, line_starts, json.dumps(normalized_names)))
+        elif key.value == "options":
+            records = _literal_option_dicts(value)
+            if records is None:
+                continue
+            normalized_records = _normalize_option_records(records)
+            if normalized_records != records:
+                replacements.append(_node_replacement(value, line_starts, json.dumps(normalized_records)))
+    return replacements
+
+
+def _normalize_option_records(records: list[dict[str, object]]) -> list[dict[str, object]]:
+    normalized: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for record in records:
+        name = normalize_option_name(str(record.get("name", "")))
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        description = str(record.get("description", "") or name).strip()[:100]
+        option_type = normalize_option_type(str(record.get("type", "string")))
+        normalized.append(
+            {
+                "name": name,
+                "description": description,
+                "type": option_type,
+                "required": bool(record.get("required", False)),
+            }
+        )
+    return sorted(normalized, key=lambda item: not bool(item["required"]))
+
+
+def _node_replacement(node: ast.AST, line_starts: list[int], text: str) -> tuple[int, int, str]:
+    start = line_starts[node.lineno - 1] + node.col_offset
+    end = line_starts[node.end_lineno - 1] + node.end_col_offset
+    return start, end, text
+
+
+def _line_start_offsets(source: str) -> list[int]:
+    starts = [0]
+    for match in re.finditer(r"\n", source):
+        starts.append(match.end())
+    return starts

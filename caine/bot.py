@@ -9,6 +9,7 @@ from openai import OpenAIError
 
 from caine.command_system import (
     CommandLevel,
+    CommandOption,
     CommandSpec,
     has_command_access,
     load_kinger_role_ids,
@@ -54,15 +55,64 @@ class AttachmentInputError(ValueError):
 
 
 CORE_COMMANDS = {
-    "help": CommandSpec(("help",), "Shows core commands and plugin details.", CommandLevel.USER, "General"),
-    "ask": CommandSpec(("ask",), "Asks C.A.I.N.E. via OpenAI.", CommandLevel.USER, "General"),
+    "help": CommandSpec(
+        ("help",),
+        "Shows core commands and plugin details.",
+        CommandLevel.USER,
+        "General",
+        (CommandOption("topic", "Plugin name for detailed help.", "string", False),),
+    ),
+    "ask": CommandSpec(
+        ("ask",),
+        "Asks C.A.I.N.E. via OpenAI.",
+        CommandLevel.USER,
+        "General",
+        (CommandOption("prompt", "Question or prompt.", "string", True),),
+    ),
     "plugins": CommandSpec(("plugins",), "Lists loaded plugins.", CommandLevel.USER, "General"),
-    "evolve": CommandSpec(("evolve",), "Creates a pending plugin from a feature request.", CommandLevel.ADMIN, "Plugin Lab"),
-    "evolve_plugin": CommandSpec(("evolve_plugin",), "Creates a pending update for an existing plugin.", CommandLevel.ADMIN, "Plugin Lab"),
+    "evolve": CommandSpec(
+        ("evolve",),
+        "Creates a pending plugin from a feature request.",
+        CommandLevel.ADMIN,
+        "Plugin Lab",
+        (
+            CommandOption("request", "Feature request text.", "string", False),
+            CommandOption("file", "Optional text attachment.", "attachment", False),
+        ),
+    ),
+    "evolve_plugin": CommandSpec(
+        ("evolve_plugin",),
+        "Creates a pending update for an existing plugin.",
+        CommandLevel.ADMIN,
+        "Plugin Lab",
+        (
+            CommandOption("plugin_id", "Plugin ID to update.", "string", True),
+            CommandOption("request", "Change request text.", "string", False),
+            CommandOption("file", "Optional text attachment.", "attachment", False),
+        ),
+    ),
     "pending": CommandSpec(("pending",), "Lists pending plugin drafts.", CommandLevel.ADMIN, "Plugin Lab"),
-    "review": CommandSpec(("review",), "Shows pending plugin source.", CommandLevel.ADMIN, "Plugin Lab"),
-    "approve": CommandSpec(("approve",), "Approves and loads a pending plugin.", CommandLevel.ADMIN, "Plugin Lab"),
-    "reject": CommandSpec(("reject",), "Deletes a pending plugin draft.", CommandLevel.ADMIN, "Plugin Lab"),
+    "review": CommandSpec(
+        ("review",),
+        "Shows pending plugin source.",
+        CommandLevel.ADMIN,
+        "Plugin Lab",
+        (CommandOption("plugin_id", "Pending plugin ID.", "string", True),),
+    ),
+    "approve": CommandSpec(
+        ("approve",),
+        "Approves and loads a pending plugin.",
+        CommandLevel.ADMIN,
+        "Plugin Lab",
+        (CommandOption("plugin_id", "Pending plugin ID.", "string", True),),
+    ),
+    "reject": CommandSpec(
+        ("reject",),
+        "Deletes a pending plugin draft.",
+        CommandLevel.ADMIN,
+        "Plugin Lab",
+        (CommandOption("plugin_id", "Pending plugin ID.", "string", True),),
+    ),
     "reload_plugins": CommandSpec(("reload_plugins",), "Reloads approved plugins.", CommandLevel.ADMIN, "Plugin Lab"),
     "health": CommandSpec(("health",), "Checks CAINE runtime state.", CommandLevel.KINGER, "System"),
 }

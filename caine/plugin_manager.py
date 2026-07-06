@@ -7,7 +7,7 @@ import json
 import logging
 import re
 import shutil
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +19,7 @@ from caine.plugin_validation import (
     PluginValidationError,
     ValidationResult,
     extract_plugin_metadata,
+    normalize_plugin_command_source,
     validate_plugin_source,
 )
 
@@ -61,6 +62,8 @@ class PluginManager:
         self.trusted_plugins = trusted_plugins
         self.loaded: dict[str, LoadedPlugin] = {}
         self._plugin_commands: dict[str, list[str]] = {}
+        self._plugin_owned_commands: dict[str, list[str]] = {}
+        self._command_owners: dict[str, str] = {}
         self._plugin_slash_commands: dict[str, list[str]] = {}
         self._plugin_listeners: dict[str, list[tuple[str, Any]]] = {}
         self._plugin_subscriptions: dict[str, list[tuple[str, Any]]] = {}
@@ -74,6 +77,7 @@ class PluginManager:
 
     def save_pending(self, suggested_name: str, source: str) -> tuple[str, Path, ValidationResult]:
         self.ensure_dirs()
+        source = normalize_plugin_command_source(source)
         slug = self._unique_slug(suggested_name, self.pending_dir)
         path = self.pending_dir / f"{slug}.py"
         path.write_text(source, encoding="utf-8")
@@ -86,6 +90,7 @@ class PluginManager:
         source_path: Path,
     ) -> tuple[str, Path, ValidationResult]:
         self.ensure_dirs()
+        source = normalize_plugin_command_source(source)
         target_plugin_id = slugify(plugin_id)
         preferred_path = self.pending_dir / f"{target_plugin_id}.py"
 
@@ -115,10 +120,12 @@ class PluginManager:
         self.ensure_dirs()
         result: list[tuple[str, Path, ValidationResult]] = []
         for path in sorted(self.pending_dir.glob("*.py")):
-            result.append((path.stem, path, self.validate_source(path.read_text(encoding="utf-8"))))
+            source = self._read_normalized_source(path, write_back=True)
+            result.append((path.stem, path, self.validate_source(source)))
         return result
 
     def validate_source(self, source: str) -> ValidationResult:
+        source = normalize_plugin_command_source(source)
         strict = validate_plugin_source(source)
         if not self.trusted_plugins:
             return strict
@@ -180,7 +187,7 @@ class PluginManager:
         if not source_path.exists():
             raise FileNotFoundError(f"pending plugin '{plugin_id}' not found")
 
-        source = source_path.read_text(encoding="utf-8")
+        source = self._read_normalized_source(source_path, write_back=True)
         validation = self.validate_source(source)
         if not validation.ok:
             raise PluginValidationError(validation.summary())
@@ -191,11 +198,18 @@ class PluginManager:
             replace_plugin_id = source_path.stem
 
         conflicts = self._command_conflicts(validation.command_names, replace_plugin_id)
+        replacement_target: Path | None = None
+        if conflicts and replace_plugin_id is None:
+            replacement = self._replacement_from_conflicts(conflicts)
+            if replacement is not None:
+                replace_plugin_id, replacement_target = replacement
+                target = replacement_target
+                conflicts = self._command_conflicts(validation.command_names, replace_plugin_id)
         if conflicts:
             raise PluginValidationError(f"command already exists: {', '.join(conflicts)}")
 
         if replace_plugin_id is not None:
-            return await self._approve_replacement(source_path, validation, replace_plugin_id)
+            return await self._approve_replacement(source_path, validation, replace_plugin_id, replacement_target)
 
         shutil.move(str(source_path), str(target))
         try:
@@ -259,6 +273,7 @@ class PluginManager:
         )
         self.loaded[plugin_name] = loaded
         self._plugin_commands[plugin_name] = []
+        self._plugin_owned_commands[plugin_name] = []
 
         api = PluginAPI(
             bot=self.bot,
@@ -285,9 +300,11 @@ class PluginManager:
     def unload_plugin(self, plugin_name: str) -> None:
         for command_name in self._plugin_commands.pop(plugin_name, []):
             self.bot.remove_command(command_name)
+        for owned_name in self._plugin_owned_commands.pop(plugin_name, []):
+            if self._command_owners.get(owned_name) == plugin_name:
+                self._command_owners.pop(owned_name, None)
         for slash_command_name in self._plugin_slash_commands.pop(plugin_name, []):
             remove_slash_command(self.bot, slash_command_name)
-            remove_slash_command(self.bot, command_name)
         for event_name, handler in self._plugin_listeners.pop(plugin_name, []):
             self.bot.remove_listener(handler, event_name)
         for topic, handler in self._plugin_subscriptions.pop(plugin_name, []):
@@ -303,8 +320,31 @@ class PluginManager:
         if command.name in RESERVED_PLUGIN_COMMAND_NAMES:
             log.info("plugin %s command '%s' is reserved and was skipped", plugin_name, command.name)
             return
-        if command.name in self.bot.all_commands:
-            raise PluginValidationError(f"command '{command.name}' already exists")
+        registered_names = self._registered_command_names(command)
+        reserved_aliases = [
+            command_name
+            for command_name in registered_names
+            if command_name in RESERVED_PLUGIN_COMMAND_NAMES and command_name != command.name
+        ]
+        if reserved_aliases:
+            command.aliases = [alias for alias in command.aliases if alias not in RESERVED_PLUGIN_COMMAND_NAMES]
+            spec = getattr(command, "caine_spec", None)
+            if spec is not None:
+                command.caine_spec = replace(
+                    spec,
+                    names=tuple(name for name in spec.names if name not in RESERVED_PLUGIN_COMMAND_NAMES),
+                )
+            registered_names = self._registered_command_names(command)
+            log.info(
+                "plugin %s reserved aliases skipped: %s",
+                plugin_name,
+                ", ".join(reserved_aliases),
+            )
+        for command_name in registered_names:
+            if command_name in RESERVED_PLUGIN_COMMAND_NAMES:
+                continue
+            if command_name in self.bot.all_commands:
+                raise PluginValidationError(f"command '{command_name}' already exists")
         self.bot.add_command(command)
         spec = getattr(command, "caine_spec", None)
         handler = getattr(command, "caine_handler", None)
@@ -313,6 +353,9 @@ class PluginManager:
             self._plugin_slash_commands.setdefault(plugin_name, []).extend(
                 slash_command.name for slash_command in slash_commands
             )
+        self._plugin_owned_commands.setdefault(plugin_name, []).extend(registered_names)
+        for command_name in registered_names:
+            self._command_owners[command_name] = plugin_name
         self._plugin_commands.setdefault(plugin_name, []).append(command.name)
 
     async def _approve_replacement(
@@ -320,8 +363,9 @@ class PluginManager:
         source_path: Path,
         validation: ValidationResult,
         replace_plugin_id: str,
+        target_path: Path | None = None,
     ) -> LoadedPlugin:
-        target = self.approved_dir / f"{replace_plugin_id}.py"
+        target = target_path or self.approved_dir / f"{replace_plugin_id}.py"
         archived_path = self._archive_approved_plugin(target)
         moved_pending = False
 
@@ -353,13 +397,42 @@ class PluginManager:
         command_names: list[str],
         replace_plugin_id: str | None = None,
     ) -> list[str]:
-        allowed_existing = set(self._plugin_commands.get(replace_plugin_id or "", []))
+        allowed_existing = set(self._plugin_owned_commands.get(replace_plugin_id or "", []))
         return [
             name
             for name in command_names
             if name in self.bot.all_commands and name not in allowed_existing
             and name not in RESERVED_PLUGIN_COMMAND_NAMES
         ]
+
+    def _replacement_from_conflicts(self, conflicts: list[str]) -> tuple[str, Path] | None:
+        owners = {
+            self._command_owners.get(command_name)
+            for command_name in conflicts
+            if command_name not in RESERVED_PLUGIN_COMMAND_NAMES
+        }
+        owners.discard(None)
+        if len(owners) != 1:
+            return None
+        plugin_name = next(iter(owners))
+        loaded = self.loaded.get(plugin_name)
+        if loaded is None:
+            return None
+        return plugin_name, loaded.path
+
+    def _registered_command_names(self, command: commands.Command) -> list[str]:
+        spec = getattr(command, "caine_spec", None)
+        names = list(getattr(spec, "names", ()) or ())
+        if not names:
+            names = [command.name, *command.aliases]
+        return list(dict.fromkeys(names))
+
+    def _read_normalized_source(self, path: Path, write_back: bool = False) -> str:
+        source = path.read_text(encoding="utf-8")
+        normalized = normalize_plugin_command_source(source)
+        if write_back and normalized != source:
+            path.write_text(normalized, encoding="utf-8")
+        return normalized
 
     def _archive_approved_plugin(self, target: Path) -> Path | None:
         if not target.exists():

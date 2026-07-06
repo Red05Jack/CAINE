@@ -81,6 +81,27 @@ def test_approve_existing_plugin_archives_old_version_and_moves_pending(tmp_path
     assert archive_path.read_text(encoding="utf-8") == OLD_PLUGIN
 
 
+def test_approve_conflicting_pending_replaces_loaded_owner(tmp_path):
+    bot = make_bot()
+    manager = make_manager(tmp_path, bot)
+    manager.ensure_dirs()
+
+    approved_path = manager.approved_dir / "demo.py"
+    approved_path.write_text(OLD_PLUGIN, encoding="utf-8")
+    run(manager.load_plugin_file(approved_path, forced_plugin_name="demo"))
+    pending_id, pending_path, validation = manager.save_pending("demo_update", NEW_PLUGIN)
+
+    loaded = run(manager.approve(pending_id))
+
+    archive_path = manager.archive_dir / "demoV1.py"
+    assert validation.ok
+    assert loaded.name == "demo"
+    assert loaded.path == approved_path
+    assert not pending_path.exists()
+    assert approved_path.read_text(encoding="utf-8") == NEW_PLUGIN
+    assert archive_path.read_text(encoding="utf-8") == OLD_PLUGIN
+
+
 def test_plugin_help_command_is_reserved_for_global_help(tmp_path):
     bot = make_bot()
     manager = make_manager(tmp_path, bot)
