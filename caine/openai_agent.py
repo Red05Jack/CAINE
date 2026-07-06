@@ -509,7 +509,15 @@ class OpenAIAgent:
                 - Do not wrap the code in markdown fences.
                 - The file must define PLUGIN = {"name": "...", "description": "..."}.
                 - The file must define async def setup_plugin(api): ...
-                - Register commands with @api.command("command_name", description="...").
+                - Register commands with @api.command({
+                  "names": ["command_name"],
+                  "description": "...",
+                  "level": "user"
+                  }).
+                - Command levels are:
+                  "kinger" for S1 Kinger-role-only commands,
+                  "admin" for S2 Discord administrator commands,
+                  and "user" for S3 public commands.
                 - Do not register a command named "help"; CAINE provides
                   global plugin details through !help <pluginname>.
                 - Command handlers must be async def handler(ctx, args): ...
@@ -540,7 +548,15 @@ class OpenAIAgent:
             - Do not wrap the code in markdown fences.
             - The file must define PLUGIN = {"name": "...", "description": "..."}.
             - The file must define async def setup_plugin(api): ...
-            - Register at least one command with @api.command("command_name", description="...").
+            - Register at least one command with @api.command({
+              "names": ["command_name"],
+              "description": "...",
+              "level": "user"
+              }).
+            - Command levels are:
+              "kinger" for S1 Kinger-role-only commands,
+              "admin" for S2 Discord administrator commands,
+              and "user" for S3 public commands.
             - Do not register a command named "help"; CAINE provides global
               plugin details through !help <pluginname>.
             - Command handlers must be async def handler(ctx, args): ...

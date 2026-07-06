@@ -13,6 +13,7 @@ from typing import Any
 
 from discord.ext import commands
 
+from caine.command_system import add_slash_command, remove_slash_command
 from caine.plugin_api import PluginAPI
 from caine.plugin_validation import (
     PluginValidationError,
@@ -60,6 +61,7 @@ class PluginManager:
         self.trusted_plugins = trusted_plugins
         self.loaded: dict[str, LoadedPlugin] = {}
         self._plugin_commands: dict[str, list[str]] = {}
+        self._plugin_slash_commands: dict[str, list[str]] = {}
         self._plugin_listeners: dict[str, list[tuple[str, Any]]] = {}
         self._plugin_subscriptions: dict[str, list[tuple[str, Any]]] = {}
         self._topic_handlers: dict[str, list[tuple[str, Any]]] = {}
@@ -283,6 +285,9 @@ class PluginManager:
     def unload_plugin(self, plugin_name: str) -> None:
         for command_name in self._plugin_commands.pop(plugin_name, []):
             self.bot.remove_command(command_name)
+        for slash_command_name in self._plugin_slash_commands.pop(plugin_name, []):
+            remove_slash_command(self.bot, slash_command_name)
+            remove_slash_command(self.bot, command_name)
         for event_name, handler in self._plugin_listeners.pop(plugin_name, []):
             self.bot.remove_listener(handler, event_name)
         for topic, handler in self._plugin_subscriptions.pop(plugin_name, []):
@@ -301,6 +306,13 @@ class PluginManager:
         if command.name in self.bot.all_commands:
             raise PluginValidationError(f"command '{command.name}' already exists")
         self.bot.add_command(command)
+        spec = getattr(command, "caine_spec", None)
+        handler = getattr(command, "caine_handler", None)
+        if spec is not None and handler is not None:
+            slash_commands = add_slash_command(self.bot, spec, handler, plugin_name=plugin_name)
+            self._plugin_slash_commands.setdefault(plugin_name, []).extend(
+                slash_command.name for slash_command in slash_commands
+            )
         self._plugin_commands.setdefault(plugin_name, []).append(command.name)
 
     async def _approve_replacement(

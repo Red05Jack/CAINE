@@ -8,6 +8,8 @@ from typing import Any
 
 from discord.ext import commands
 
+from caine.command_system import build_prefix_command, command_spec
+
 
 PluginHandler = Callable[[commands.Context, str], Awaitable[None]]
 EventHandler = Callable[..., Any]
@@ -43,19 +45,22 @@ class PluginAPI:
 
     def command(
         self,
-        name: str,
+        name: str | dict[str, Any],
         description: str = "",
         aliases: tuple[str, ...] | list[str] = (),
+        level: str = "user",
     ) -> Callable[[PluginHandler], PluginHandler]:
         def decorator(handler: PluginHandler) -> PluginHandler:
-            async def callback(ctx: commands.Context, *, args: str = "") -> None:
+            spec = command_spec(name, description=description, aliases=aliases, level=level)
+
+            async def callback(ctx: commands.Context, args: str = "") -> None:
                 await handler(ctx, args)
 
-            command = commands.Command(
+            command = build_prefix_command(
+                self._bot,
+                spec,
                 callback,
-                name=name,
-                help=description,
-                aliases=list(aliases),
+                plugin_name=self._plugin_name,
             )
             self._register_command(self._plugin_name, command)
             return handler

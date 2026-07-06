@@ -21,6 +21,23 @@ def test_valid_plugin_passes():
     assert result.metadata["name"] == "dice"
 
 
+def test_command_object_plugin_passes():
+    result = validate_plugin_source(
+        """
+PLUGIN = {"name": "dice", "description": "Rolls a die."}
+
+
+async def setup_plugin(api):
+    @api.command({"names": ["dice"], "description": "Roll a die.", "level": "user"})
+    async def dice(ctx, args):
+        await api.reply(ctx, "rolled")
+"""
+    )
+
+    assert result.ok
+    assert result.command_names == ["dice"]
+
+
 def test_banned_import_fails():
     result = validate_plugin_source(
         """

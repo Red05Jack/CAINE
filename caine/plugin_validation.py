@@ -70,7 +70,8 @@ BANNED_NODE_TYPES = (
     ast.With,
 )
 
-COMMAND_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{1,31}$")
+COMMAND_NAME_RE = re.compile(r"^[a-z][a-z0-9_-]{1,31}$")
+COMMAND_LEVELS = {"kinger", "admin", "user", "s1", "s2", "s3"}
 
 
 @dataclass
@@ -154,11 +155,16 @@ def validate_plugin_source(source: str) -> ValidationResult:
                     errors.append("only api.command decorators are allowed")
 
         if isinstance(node, ast.Call):
-            command_name = _command_name_from_call(node)
-            if command_name is not None:
-                command_names.append(command_name)
-                if not COMMAND_NAME_RE.match(command_name):
-                    errors.append(f"command name '{command_name}' is invalid")
+            node_command_names = _command_names_from_call(node)
+            if node_command_names is not None:
+                for command_name in node_command_names:
+                    command_names.append(command_name)
+                    if not COMMAND_NAME_RE.match(command_name):
+                        errors.append(f"command name '{command_name}' is invalid")
+
+                command_level = _command_level_from_call(node)
+                if command_level is not None and command_level not in COMMAND_LEVELS:
+                    errors.append(f"command level '{command_level}' is invalid")
 
     if not command_names:
         errors.append("plugin must register at least one api.command(...)")
@@ -199,7 +205,7 @@ def extract_plugin_metadata(source_or_tree: str | ast.Module) -> dict[str, str]:
     return {}
 
 
-def _command_name_from_call(node: ast.Call) -> str | None:
+def _command_names_from_call(node: ast.Call) -> list[str] | None:
     func = node.func
     if not (
         isinstance(func, ast.Attribute)
@@ -212,9 +218,51 @@ def _command_name_from_call(node: ast.Call) -> str | None:
         return None
     first = node.args[0]
     if isinstance(first, ast.Constant) and isinstance(first.value, str):
-        return first.value
-    return ""
+        return [first.value]
+    if isinstance(first, ast.Dict):
+        return _command_names_from_dict(first)
+    return [""]
+
+
+def _command_level_from_call(node: ast.Call) -> str | None:
+    for keyword in node.keywords:
+        if keyword.arg == "level" and isinstance(keyword.value, ast.Constant):
+            return str(keyword.value.value).strip().lower()
+
+    if not node.args or not isinstance(node.args[0], ast.Dict):
+        return None
+
+    for key, value in zip(node.args[0].keys, node.args[0].values):
+        if isinstance(key, ast.Constant) and key.value == "level" and isinstance(value, ast.Constant):
+            return str(value.value).strip().lower()
+    return None
+
+
+def _command_names_from_dict(node: ast.Dict) -> list[str]:
+    for key, value in zip(node.keys, node.values):
+        if not isinstance(key, ast.Constant):
+            continue
+        if key.value == "name" and isinstance(value, ast.Constant) and isinstance(value.value, str):
+            return [value.value]
+        if key.value == "names":
+            names = _literal_string_sequence(value)
+            return names or [""]
+    return [""]
+
+
+def _literal_string_sequence(node: ast.AST) -> list[str]:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return [node.value]
+    if isinstance(node, (ast.List, ast.Tuple)):
+        result = []
+        for item in node.elts:
+            if isinstance(item, ast.Constant) and isinstance(item.value, str):
+                result.append(item.value)
+            else:
+                return []
+        return result
+    return []
 
 
 def _is_api_command_decorator(node: ast.AST) -> bool:
-    return isinstance(node, ast.Call) and _command_name_from_call(node) is not None
+    return isinstance(node, ast.Call) and _command_names_from_call(node) is not None

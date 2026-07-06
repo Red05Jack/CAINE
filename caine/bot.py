@@ -7,10 +7,19 @@ import discord
 from discord.ext import commands
 from openai import OpenAIError
 
+from caine.command_system import (
+    CommandLevel,
+    CommandSpec,
+    has_command_access,
+    load_kinger_role_ids,
+    register_dual_command,
+    sync_application_commands,
+    user_has_any_role,
+)
 from caine.config import Settings, load_settings
 from caine.openai_agent import OpenAIAgent
 from caine.plugin_manager import PluginManager, slugify
-from caine.plugin_validation import PluginValidationError, validate_plugin_source
+from caine.plugin_validation import PluginValidationError
 
 
 log = logging.getLogger("caine")
@@ -44,25 +53,25 @@ class AttachmentInputError(ValueError):
     pass
 
 
+CORE_COMMANDS = {
+    "help": CommandSpec(("help",), "Shows core commands and plugin details.", CommandLevel.USER, "General"),
+    "ask": CommandSpec(("ask",), "Asks C.A.I.N.E. via OpenAI.", CommandLevel.USER, "General"),
+    "plugins": CommandSpec(("plugins",), "Lists loaded plugins.", CommandLevel.USER, "General"),
+    "evolve": CommandSpec(("evolve",), "Creates a pending plugin from a feature request.", CommandLevel.ADMIN, "Plugin Lab"),
+    "evolve_plugin": CommandSpec(("evolve_plugin",), "Creates a pending update for an existing plugin.", CommandLevel.ADMIN, "Plugin Lab"),
+    "pending": CommandSpec(("pending",), "Lists pending plugin drafts.", CommandLevel.ADMIN, "Plugin Lab"),
+    "review": CommandSpec(("review",), "Shows pending plugin source.", CommandLevel.ADMIN, "Plugin Lab"),
+    "approve": CommandSpec(("approve",), "Approves and loads a pending plugin.", CommandLevel.ADMIN, "Plugin Lab"),
+    "reject": CommandSpec(("reject",), "Deletes a pending plugin draft.", CommandLevel.ADMIN, "Plugin Lab"),
+    "reload_plugins": CommandSpec(("reload_plugins",), "Reloads approved plugins.", CommandLevel.ADMIN, "Plugin Lab"),
+    "health": CommandSpec(("health",), "Checks CAINE runtime state.", CommandLevel.KINGER, "System"),
+}
+
 CORE_HELP_GROUPS = (
-    ("Allgemein", ("help", "ask", "plugins")),
-    ("Plugin-Werkstatt", ("evolve", "evolve_plugin", "pending", "review", "approve", "reject", "reload_plugins")),
+    ("General", ("help", "ask", "plugins")),
+    ("Plugin Lab", ("evolve", "evolve_plugin", "pending", "review", "approve", "reject", "reload_plugins")),
     ("System", ("health",)),
 )
-
-CORE_COMMAND_DESCRIPTIONS = {
-    "help": "Zeigt diese Uebersicht oder Details zu einem Plugin.",
-    "ask": "Fragt C.A.I.N.E. ueber OpenAI.",
-    "plugins": "Listet geladene Plugins.",
-    "evolve": "Erzeugt einen neuen pending Plugin-Vorschlag.",
-    "evolve_plugin": "Erzeugt eine pending Aenderung fuer ein bestehendes Plugin.",
-    "pending": "Listet wartende Plugin-Vorschlaege.",
-    "review": "Zeigt den Code eines pending Plugins.",
-    "approve": "Aktiviert ein pending Plugin.",
-    "reject": "Loescht einen pending Plugin-Vorschlag.",
-    "reload_plugins": "Laedt approved Plugins neu.",
-    "health": "Prueft den CAINE-Laufzeitstatus.",
-}
 
 
 class CaineBot(commands.Bot):
@@ -88,16 +97,21 @@ class CaineBot(commands.Bot):
             data_dir=settings.data_dir,
             trusted_plugins=settings.trusted_plugins,
         )
+        self._slash_synced_after_ready = False
 
     async def setup_hook(self) -> None:
         self.plugins.ensure_dirs()
         if self.settings.plugin_autoload:
             loaded = await self.plugins.load_all_approved()
             log.info("loaded %s approved plugins", len(loaded))
+        await sync_application_commands(self)
 
     async def on_ready(self) -> None:
         guilds = ", ".join(guild.name for guild in self.guilds) or "no guilds"
         log.info("logged in as %s (%s)", self.user, guilds)
+        if not self._slash_synced_after_ready:
+            self._slash_synced_after_ready = True
+            await sync_application_commands(self)
 
     async def on_command_error(self, ctx: commands.Context, error: commands.CommandError) -> None:
         if isinstance(error, commands.CommandNotFound):
@@ -117,47 +131,16 @@ class CaineBot(commands.Bot):
         await ctx.reply(f"Fehler: `{str(error)[:400]}`", mention_author=False)
 
 
-def is_caine_admin() -> commands.Check:
-    async def predicate(ctx: commands.Context) -> bool:
-        bot = ctx.bot
-        if await bot.is_owner(ctx.author):
-            return True
-        if isinstance(ctx.author, discord.Member):
-            if ctx.author.guild_permissions.administrator:
-                return True
-            settings = getattr(bot, "settings", None)
-            allowed_role_names = getattr(settings, "admin_role_names", set())
-            allowed_role_ids = getattr(settings, "admin_role_ids", set())
-            if allowed_role_ids and any(role.id in allowed_role_ids for role in ctx.author.roles):
-                return True
-            if allowed_role_names and any(role.name in allowed_role_names for role in ctx.author.roles):
-                return True
-        return False
-
-    return commands.check(predicate)
-
-
-def in_allowed_guild() -> commands.Check:
-    async def predicate(ctx: commands.Context) -> bool:
-        settings = getattr(ctx.bot, "settings", None)
-        allowed_ids = getattr(settings, "allowed_guild_ids", set())
-        if not allowed_ids:
-            return True
-        return ctx.guild is not None and ctx.guild.id in allowed_ids
-
-    return commands.check(predicate)
-
-
 def install_commands(bot: CaineBot) -> None:
-    @bot.command(name="help", aliases=["hilfe"])
-    @in_allowed_guild()
-    async def caine_help(ctx: commands.Context, *, topic: str = "") -> None:
-        """Show grouped CAINE help."""
-        topic = clean_help_topic(topic)
+    async def caine_help(ctx: commands.Context, args: str = "") -> None:
+        topic = clean_help_topic(args)
         if topic:
-            plugin_help = build_plugin_help_text(bot, topic)
+            plugin_help = await build_plugin_help_text(bot, topic, ctx.author)
             if plugin_help is None:
-                plugin_names = ", ".join(f"`{plugin.name}`" for plugin in sorted(bot.plugins.loaded.values(), key=lambda item: item.name))
+                plugin_names = ", ".join(
+                    f"`{plugin.name}`"
+                    for plugin in sorted(bot.plugins.loaded.values(), key=lambda item: item.name)
+                )
                 await ctx.reply(
                     f"Plugin `{topic}` nicht gefunden. Geladene Plugins: {plugin_names or 'keine'}.",
                     mention_author=False,
@@ -166,12 +149,13 @@ def install_commands(bot: CaineBot) -> None:
             await send_long(ctx, plugin_help)
             return
 
-        await send_long(ctx, build_general_help_text(bot))
+        await send_long(ctx, await build_general_help_text(bot, ctx.author))
 
-    @bot.command(name="ask", aliases=["frag"])
-    @in_allowed_guild()
-    async def ask(ctx: commands.Context, *, prompt: str) -> None:
-        """Ask C.A.I.N.E. via OpenAI."""
+    async def ask(ctx: commands.Context, args: str = "") -> None:
+        prompt = args.strip()
+        if not prompt:
+            await ctx.reply("Bitte gib eine Frage an.", mention_author=False)
+            return
         if bot.agent is None:
             await ctx.reply("OpenAI ist nicht konfiguriert. Setze `OPENAI_API_KEY`.", mention_author=False)
             return
@@ -183,16 +167,12 @@ def install_commands(bot: CaineBot) -> None:
             return
         await send_long(ctx, answer)
 
-    @bot.command(name="evolve", aliases=["entwickle"])
-    @in_allowed_guild()
-    @is_caine_admin()
-    async def evolve(ctx: commands.Context, *, request: str = "") -> None:
-        """Generate a pending plugin from a feature request."""
+    async def evolve(ctx: commands.Context, args: str = "") -> None:
         if bot.agent is None:
             await ctx.reply("OpenAI ist nicht konfiguriert. Setze `OPENAI_API_KEY`.", mention_author=False)
             return
         try:
-            request_text = await request_text_from_message(ctx, request)
+            request_text = await request_text_from_message(ctx, args)
         except AttachmentInputError as exc:
             await ctx.reply(str(exc), mention_author=False)
             return
@@ -226,21 +206,12 @@ def install_commands(bot: CaineBot) -> None:
             mention_author=False,
         )
 
-    @bot.command(name="evolve_plugin", aliases=["modify_plugin", "update_plugin", "erweitere"])
-    @in_allowed_guild()
-    @is_caine_admin()
-    async def evolve_plugin(
-        ctx: commands.Context,
-        plugin_id: str = "",
-        *,
-        request: str = "",
-    ) -> None:
-        """Update an existing plugin and save the new version as pending."""
+    async def evolve_plugin(ctx: commands.Context, args: str = "") -> None:
         if bot.agent is None:
             await ctx.reply("OpenAI ist nicht konfiguriert. Setze `OPENAI_API_KEY`.", mention_author=False)
             return
 
-        plugin_id = plugin_id.strip()
+        plugin_id, request = split_first_arg(args)
         if not plugin_id:
             await ctx.reply(
                 "Bitte gib die Plugin-ID an, z. B. "
@@ -303,11 +274,7 @@ def install_commands(bot: CaineBot) -> None:
             mention_author=False,
         )
 
-    @bot.command(name="pending")
-    @in_allowed_guild()
-    @is_caine_admin()
-    async def pending(ctx: commands.Context) -> None:
-        """List pending plugin drafts."""
+    async def pending(ctx: commands.Context, args: str = "") -> None:
         items = bot.plugins.list_pending()
         if not items:
             await ctx.reply("Keine wartenden Plugin-Vorschlaege.", mention_author=False)
@@ -322,11 +289,11 @@ def install_commands(bot: CaineBot) -> None:
             lines.append(f"- `{plugin_id}` [{marker}] {description}{suffix}")
         await ctx.reply("\n".join(lines)[:1900], mention_author=False)
 
-    @bot.command(name="review")
-    @in_allowed_guild()
-    @is_caine_admin()
-    async def review(ctx: commands.Context, plugin_id: str) -> None:
-        """Show pending plugin source."""
+    async def review(ctx: commands.Context, args: str = "") -> None:
+        plugin_id = args.strip()
+        if not plugin_id:
+            await ctx.reply("Bitte gib die Plugin-ID an.", mention_author=False)
+            return
         path = bot.plugins.pending_path(plugin_id)
         if not path.exists():
             await ctx.reply(f"`{plugin_id}` existiert nicht in pending.", mention_author=False)
@@ -336,55 +303,47 @@ def install_commands(bot: CaineBot) -> None:
         header = f"Review `{path.stem}` - Validation: `{validation.summary()}`\n"
         await send_long(ctx, header + code_block(source))
 
-    @bot.command(name="approve")
-    @in_allowed_guild()
-    @is_caine_admin()
-    async def approve(ctx: commands.Context, plugin_id: str) -> None:
-        """Approve and load a pending plugin."""
+    async def approve(ctx: commands.Context, args: str = "") -> None:
+        plugin_id = args.strip()
+        if not plugin_id:
+            await ctx.reply("Bitte gib die Plugin-ID an.", mention_author=False)
+            return
         async with ctx.typing():
             loaded = await bot.plugins.approve(plugin_id)
+            await sync_application_commands(bot)
         commands_text = ", ".join(f"`{bot.settings.command_prefix}{name}`" for name in loaded.commands)
         await ctx.reply(
             f"Plugin `{loaded.name}` ist aktiv. Commands: {commands_text or 'keine'}",
             mention_author=False,
         )
 
-    @bot.command(name="reject", aliases=["ablehnen"])
-    @in_allowed_guild()
-    @is_caine_admin()
-    async def reject(ctx: commands.Context, plugin_id: str) -> None:
-        """Delete a pending plugin."""
+    async def reject(ctx: commands.Context, args: str = "") -> None:
+        plugin_id = args.strip()
+        if not plugin_id:
+            await ctx.reply("Bitte gib die Plugin-ID an.", mention_author=False)
+            return
         removed = bot.plugins.reject(plugin_id)
         text = f"`{plugin_id}` geloescht." if removed else f"`{plugin_id}` nicht gefunden."
         await ctx.reply(text, mention_author=False)
 
-    @bot.command(name="plugins")
-    @in_allowed_guild()
-    async def plugins(ctx: commands.Context) -> None:
-        """List loaded plugins."""
+    async def plugins(ctx: commands.Context, args: str = "") -> None:
         if not bot.plugins.loaded:
             await ctx.reply("Keine Plugins geladen.", mention_author=False)
             return
         lines = ["Geladene Plugins:"]
         for plugin in bot.plugins.loaded.values():
-            command_text = ", ".join(f"`{bot.settings.command_prefix}{name}`" for name in plugin.commands)
+            commands_for_user = await registered_plugin_commands(bot, plugin, ctx.author)
+            command_text = ", ".join(f"`{bot.settings.command_prefix}{command.name}`" for command in commands_for_user)
             lines.append(f"- `{plugin.name}`: {plugin.description} ({command_text})")
         await ctx.reply("\n".join(lines)[:1900], mention_author=False)
 
-    @bot.command(name="reload_plugins")
-    @in_allowed_guild()
-    @is_caine_admin()
-    async def reload_plugins(ctx: commands.Context) -> None:
-        """Reload approved plugins."""
+    async def reload_plugins(ctx: commands.Context, args: str = "") -> None:
         async with ctx.typing():
             loaded = await bot.plugins.reload_all_approved()
+            await sync_application_commands(bot)
         await ctx.reply(f"{len(loaded)} Plugins neu geladen.", mention_author=False)
 
-    @bot.command(name="health")
-    @in_allowed_guild()
-    @is_caine_admin()
-    async def health(ctx: commands.Context) -> None:
-        """Check CAINE runtime state."""
+    async def health(ctx: commands.Context, args: str = "") -> None:
         env_status = "gesetzt" if bot.settings.discord_token else "fehlt"
         openai_status = "gesetzt" if bot.agent is not None else "fehlt"
         plugin_count = len(bot.plugins.loaded)
@@ -402,6 +361,22 @@ def install_commands(bot: CaineBot) -> None:
             lines.append(f"- OpenAI Ping: `{result[:300]}`")
         await ctx.reply("\n".join(lines), mention_author=False)
 
+    handlers = {
+        "help": caine_help,
+        "ask": ask,
+        "plugins": plugins,
+        "evolve": evolve,
+        "evolve_plugin": evolve_plugin,
+        "pending": pending,
+        "review": review,
+        "approve": approve,
+        "reject": reject,
+        "reload_plugins": reload_plugins,
+        "health": health,
+    }
+    for command_name, handler in handlers.items():
+        register_dual_command(bot, CORE_COMMANDS[command_name], handler)
+
 
 async def send_long(ctx: commands.Context, content: str) -> None:
     chunks = [content[index : index + 1900] for index in range(0, len(content), 1900)] or [""]
@@ -409,9 +384,10 @@ async def send_long(ctx: commands.Context, content: str) -> None:
         await ctx.reply(chunk, mention_author=False)
 
 
-def build_general_help_text(bot: commands.Bot) -> str:
+async def build_general_help_text(bot: commands.Bot, user: discord.abc.User | None = None) -> str:
     prefix = bot_command_prefix(bot)
     plugin_command_names = loaded_plugin_command_names(bot)
+    show_level_labels = can_view_level_labels(bot, user)
     grouped_names: set[str] = set()
     lines = [
         "CAINE Help",
@@ -425,8 +401,10 @@ def build_general_help_text(bot: commands.Bot) -> str:
             command = bot.get_command(command_name)
             if command is None or command.hidden or command.name in plugin_command_names:
                 continue
+            if not await command_visible_to_user(bot, command, user):
+                continue
             grouped_names.add(command.name)
-            group_lines.append(format_command_help_line(command, prefix))
+            group_lines.append(format_command_help_line(command, prefix, show_level_labels=show_level_labels))
         if group_lines:
             lines.append(f"\n{group_name}:")
             lines.extend(group_lines)
@@ -441,16 +419,23 @@ def build_general_help_text(bot: commands.Bot) -> str:
         ),
         key=lambda command: command.name,
     )
-    if extra_commands:
+    visible_extra_commands = []
+    for command in extra_commands:
+        if await command_visible_to_user(bot, command, user):
+            visible_extra_commands.append(command)
+    if visible_extra_commands:
         lines.append("\nWeitere:")
-        lines.extend(format_command_help_line(command, prefix) for command in extra_commands)
+        lines.extend(
+            format_command_help_line(command, prefix, show_level_labels=show_level_labels)
+            for command in visible_extra_commands
+        )
 
     lines.append("\nPlugins:")
     plugins = sorted(getattr(getattr(bot, "plugins", None), "loaded", {}).values(), key=lambda plugin: plugin.name)
     if not plugins:
         lines.append("- Keine Plugins geladen.")
     for plugin in plugins:
-        command_count = len(registered_plugin_commands(bot, plugin))
+        command_count = len(await registered_plugin_commands(bot, plugin, user))
         description = plugin.description or "ohne Beschreibung"
         lines.append(
             f"- `{plugin.name}` ({command_count} Commands): {description} "
@@ -460,34 +445,64 @@ def build_general_help_text(bot: commands.Bot) -> str:
     return "\n".join(lines)[:3900]
 
 
-def build_plugin_help_text(bot: commands.Bot, plugin_query: str) -> str | None:
+async def build_plugin_help_text(
+    bot: commands.Bot,
+    plugin_query: str,
+    user: discord.abc.User | None = None,
+) -> str | None:
     plugin = find_loaded_plugin(bot, plugin_query)
     if plugin is None:
         return None
 
     prefix = bot_command_prefix(bot)
+    show_level_labels = can_view_level_labels(bot, user)
     lines = [
         f"Plugin `{plugin.name}`",
         plugin.description or "ohne Beschreibung",
         "",
         "Commands:",
     ]
-    commands_for_plugin = registered_plugin_commands(bot, plugin)
+    commands_for_plugin = await registered_plugin_commands(bot, plugin, user)
     if not commands_for_plugin:
-        lines.append("- Keine registrierten Commands.")
+        lines.append("- Keine fuer dich sichtbaren Commands.")
     else:
-        lines.extend(format_command_help_line(command, prefix) for command in commands_for_plugin)
+        lines.extend(
+            format_command_help_line(command, prefix, show_level_labels=show_level_labels)
+            for command in commands_for_plugin
+        )
 
     return "\n".join(lines)[:3900]
 
 
-def registered_plugin_commands(bot: commands.Bot, plugin: object) -> list[commands.Command]:
+async def registered_plugin_commands(
+    bot: commands.Bot,
+    plugin: object,
+    user: discord.abc.User | None = None,
+) -> list[commands.Command]:
     result = []
     for command_name in getattr(plugin, "commands", []):
         command = bot.get_command(command_name)
-        if command is not None and not command.hidden:
+        if command is not None and not command.hidden and await command_visible_to_user(bot, command, user):
             result.append(command)
     return sorted(result, key=lambda command: command.name)
+
+
+async def command_visible_to_user(
+    bot: commands.Bot,
+    command: commands.Command,
+    user: discord.abc.User | None,
+) -> bool:
+    if user is None:
+        return True
+    spec = getattr(command, "caine_spec", None)
+    level = getattr(spec, "level", CommandLevel.USER)
+    return await has_command_access(bot, user, level)
+
+
+def can_view_level_labels(bot: commands.Bot, user: discord.abc.User | None) -> bool:
+    if user is None:
+        return True
+    return user_has_any_role(user, load_kinger_role_ids(bot))
 
 
 def loaded_plugin_command_names(bot: commands.Bot) -> set[str]:
@@ -524,14 +539,28 @@ def find_loaded_plugin(bot: commands.Bot, plugin_query: str) -> object | None:
     return None
 
 
-def format_command_help_line(command: commands.Command, prefix: str) -> str:
+def format_command_help_line(
+    command: commands.Command,
+    prefix: str,
+    show_level_labels: bool = True,
+) -> str:
     aliases = [alias for alias in command.aliases if alias != command.name]
     alias_text = ""
     if aliases:
         alias_values = ", ".join(f"`{prefix}{alias}`" for alias in aliases)
         alias_text = f" (Aliase: {alias_values})"
-    description = CORE_COMMAND_DESCRIPTIONS.get(command.name) or command.help or command.short_doc or "ohne Beschreibung"
-    return f"- `{prefix}{command.name}`{alias_text}: {description}"
+    spec = getattr(command, "caine_spec", None)
+    level = f" {command_level_label(getattr(spec, 'level', None))}" if show_level_labels else ""
+    description = getattr(spec, "description", None) or command.help or command.short_doc or "ohne Beschreibung"
+    return f"- `{prefix}{command.name}`{level}{alias_text}: {description}"
+
+
+def command_level_label(level: object) -> str:
+    if level is CommandLevel.KINGER:
+        return "[S1]"
+    if level is CommandLevel.ADMIN:
+        return "[S2]"
+    return "[S3]"
 
 
 def bot_command_prefix(bot: commands.Bot) -> str:
@@ -541,6 +570,15 @@ def bot_command_prefix(bot: commands.Bot) -> str:
 
 def clean_help_topic(topic: str) -> str:
     return topic.strip().strip("\"'")
+
+
+def split_first_arg(value: str) -> tuple[str, str]:
+    parts = value.strip().split(maxsplit=1)
+    if not parts:
+        return "", ""
+    if len(parts) == 1:
+        return parts[0], ""
+    return parts[0], parts[1].strip()
 
 
 async def request_text_from_message(ctx: commands.Context, request: str = "") -> str:

@@ -51,14 +51,13 @@ class Settings:
     openai_model: str
     command_prefix: str
     allowed_guild_ids: set[int]
-    admin_role_names: set[str]
-    admin_role_ids: set[int]
     plugin_autoload: bool
     trusted_plugins: bool
     project_root: Path
     pending_plugins_dir: Path
     approved_plugins_dir: Path
     data_dir: Path
+    command_permissions_path: Path
 
     @property
     def openai_enabled(self) -> bool:
@@ -71,6 +70,7 @@ def load_settings() -> Settings:
     pending = root / "plugins" / "pending"
     approved = root / "plugins" / "approved"
     data = root / "data"
+    command_permissions = root / "command_permissions.json"
 
     return Settings(
         discord_token=_secret(os.getenv("DISCORD_TOKEN")),
@@ -78,12 +78,11 @@ def load_settings() -> Settings:
         openai_model=os.getenv("OPENAI_MODEL", "gpt-5.5"),
         command_prefix=os.getenv("COMMAND_PREFIX", "!"),
         allowed_guild_ids=_csv_int(os.getenv("CAINE_ALLOWED_GUILD_IDS")),
-        admin_role_names=set(_csv(os.getenv("CAINE_ADMIN_ROLE_NAMES"))),
-        admin_role_ids=_csv_int(os.getenv("CAINE_ADMIN_ROLE_IDS")),
         plugin_autoload=_bool(os.getenv("CAINE_PLUGIN_AUTOLOAD"), True),
         trusted_plugins=_bool(os.getenv("CAINE_TRUSTED_PLUGINS"), False),
         project_root=root,
         pending_plugins_dir=pending,
         approved_plugins_dir=approved,
         data_dir=data,
+        command_permissions_path=command_permissions,
     )

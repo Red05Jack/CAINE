@@ -22,8 +22,32 @@ erst nach Admin-Freigabe geladen.
 - `!reject <plugin_id>`: loescht einen wartenden Vorschlag.
 - `!plugins`: zeigt geladene Plugins.
 - `!reload_plugins`: laedt freigegebene Plugins neu.
-- Adminrechte kommen von Discord-Administrator, Bot-Owner, `CAINE_ADMIN_ROLE_NAMES`
-  oder `CAINE_ADMIN_ROLE_IDS`.
+
+Alle Core- und Plugin-Commands werden aus Command-Objekten registriert. Dasselbe
+Objekt erzeugt den Prefix-Command mit `!` und den Slash-Command mit `/`.
+
+Command-Stufen:
+
+- `S1` / `kinger`: nur Nutzer mit einer Rolle aus `command_permissions.json`.
+- `S2` / `admin`: Nutzer mit Discord-Administratorrechten oder Bot-Owner.
+- `S3` / `user`: normale Nutzer ohne Sonderrechte.
+
+`!help`, `!help <pluginname>` und `!plugins` zeigen einem Nutzer nur Commands,
+fuer die seine Stufe ausreicht. Stufenlabels wie `[S1]`, `[S2]` und `[S3]`
+werden nur Nutzern mit Kinger-/Master-Rolle angezeigt.
+
+Slash-Commands werden global und zusaetzlich pro Server synchronisiert, damit
+neue `/`-Befehle nicht erst nach Discords globaler Wartezeit sichtbar werden.
+
+Die Default-Kinger-Rolle steht in `command_permissions.json`:
+
+```json
+{
+  "kingerRoleIds": [
+    1523734381146148864
+  ]
+}
+```
 
 ## Sicherheit
 
