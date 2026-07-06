@@ -10,8 +10,10 @@ erst nach Admin-Freigabe geladen.
 
 - `!ask <frage>`: Antwort ueber OpenAI.
 - `!evolve <wunsch>`: erzeugt einen Plugin-Vorschlag aus einer Beschreibung.
+  Der Wunsch kann auch komplett in einer angehaengten Textdatei stehen.
 - `!evolve_plugin <plugin_id> <wunsch>`: liest ein vorhandenes Plugin und
-  speichert eine geaenderte Version in `plugins/pending`.
+  speichert eine geaenderte Version in `plugins/pending`. Der
+  Aenderungswunsch kann auch komplett in einer angehaengten Textdatei stehen.
 - `!pending`: zeigt wartende Plugin-Vorschlaege.
 - `!review <plugin_id>`: zeigt den Code eines Vorschlags.
 - `!approve <plugin_id>`: validiert, verschiebt und laedt ein Plugin.

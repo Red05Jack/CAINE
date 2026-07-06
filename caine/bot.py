@@ -15,6 +15,34 @@ from caine.plugin_validation import PluginValidationError, validate_plugin_sourc
 
 log = logging.getLogger("caine")
 
+MAX_REQUEST_ATTACHMENT_BYTES = 128 * 1024
+TEXT_ATTACHMENT_EXTENSIONS = {
+    ".cfg",
+    ".conf",
+    ".csv",
+    ".ini",
+    ".js",
+    ".json",
+    ".log",
+    ".md",
+    ".py",
+    ".toml",
+    ".ts",
+    ".txt",
+    ".yaml",
+    ".yml",
+}
+TEXT_ATTACHMENT_CONTENT_TYPES = {
+    "application/json",
+    "application/toml",
+    "application/x-yaml",
+    "application/yaml",
+}
+
+
+class AttachmentInputError(ValueError):
+    pass
+
 
 class CaineBot(commands.Bot):
     def __init__(self, settings: Settings) -> None:
@@ -118,14 +146,25 @@ def install_commands(bot: CaineBot) -> None:
     @bot.command(name="evolve", aliases=["entwickle"])
     @in_allowed_guild()
     @is_caine_admin()
-    async def evolve(ctx: commands.Context, *, request: str) -> None:
+    async def evolve(ctx: commands.Context, *, request: str = "") -> None:
         """Generate a pending plugin from a feature request."""
         if bot.agent is None:
             await ctx.reply("OpenAI ist nicht konfiguriert. Setze `OPENAI_API_KEY`.", mention_author=False)
             return
         try:
+            request_text = await request_text_from_message(ctx, request)
+        except AttachmentInputError as exc:
+            await ctx.reply(str(exc), mention_author=False)
+            return
+        if not request_text:
+            await ctx.reply(
+                "Bitte gib einen Plugin-Wunsch ein oder haenge eine Textdatei an.",
+                mention_author=False,
+            )
+            return
+        try:
             async with ctx.typing():
-                draft = await bot.agent.create_plugin(request, ctx.author.display_name)
+                draft = await bot.agent.create_plugin(request_text, ctx.author.display_name)
                 plugin_id, path, validation = bot.plugins.save_pending(draft.name or draft.command_name, draft.code)
         except OpenAIError as exc:
             await ctx.reply(f"OpenAI-Fehler beim Generieren: `{str(exc)[:700]}`", mention_author=False)
@@ -150,10 +189,36 @@ def install_commands(bot: CaineBot) -> None:
     @bot.command(name="evolve_plugin", aliases=["modify_plugin", "update_plugin", "erweitere"])
     @in_allowed_guild()
     @is_caine_admin()
-    async def evolve_plugin(ctx: commands.Context, plugin_id: str, *, request: str) -> None:
+    async def evolve_plugin(
+        ctx: commands.Context,
+        plugin_id: str = "",
+        *,
+        request: str = "",
+    ) -> None:
         """Update an existing plugin and save the new version as pending."""
         if bot.agent is None:
             await ctx.reply("OpenAI ist nicht konfiguriert. Setze `OPENAI_API_KEY`.", mention_author=False)
+            return
+
+        plugin_id = plugin_id.strip()
+        if not plugin_id:
+            await ctx.reply(
+                "Bitte gib die Plugin-ID an, z. B. "
+                f"`{bot.settings.command_prefix}evolve_plugin levelxp` plus Text oder Textdatei.",
+                mention_author=False,
+            )
+            return
+
+        try:
+            request_text = await request_text_from_message(ctx, request)
+        except AttachmentInputError as exc:
+            await ctx.reply(str(exc), mention_author=False)
+            return
+        if not request_text:
+            await ctx.reply(
+                "Bitte gib den Aenderungswunsch ein oder haenge eine Textdatei an.",
+                mention_author=False,
+            )
             return
 
         source_info = bot.plugins.find_plugin_source(plugin_id)
@@ -171,7 +236,7 @@ def install_commands(bot: CaineBot) -> None:
                 draft = await bot.agent.update_plugin(
                     target_plugin_id,
                     current_source,
-                    request,
+                    request_text,
                     ctx.author.display_name,
                 )
                 pending_id, path, validation = bot.plugins.save_pending_revision(
@@ -302,6 +367,83 @@ async def send_long(ctx: commands.Context, content: str) -> None:
     chunks = [content[index : index + 1900] for index in range(0, len(content), 1900)] or [""]
     for chunk in chunks[:5]:
         await ctx.reply(chunk, mention_author=False)
+
+
+async def request_text_from_message(ctx: commands.Context, request: str = "") -> str:
+    parts = [request.strip()] if request.strip() else []
+    attachments = list(getattr(ctx.message, "attachments", []) or [])
+    skipped_files: list[str] = []
+
+    for attachment in attachments:
+        if not is_text_attachment(attachment):
+            skipped_files.append(attachment.filename)
+            continue
+
+        size = int(getattr(attachment, "size", 0) or 0)
+        if size > MAX_REQUEST_ATTACHMENT_BYTES:
+            raise AttachmentInputError(
+                f"`{attachment.filename}` ist zu gross. Maximal erlaubt sind "
+                f"{MAX_REQUEST_ATTACHMENT_BYTES // 1024} KB."
+            )
+
+        try:
+            content = await read_attachment_bytes(attachment)
+        except discord.HTTPException as exc:
+            raise AttachmentInputError(
+                f"`{attachment.filename}` konnte nicht gelesen werden: {str(exc)[:200]}"
+            ) from exc
+
+        if len(content) > MAX_REQUEST_ATTACHMENT_BYTES:
+            raise AttachmentInputError(
+                f"`{attachment.filename}` ist zu gross. Maximal erlaubt sind "
+                f"{MAX_REQUEST_ATTACHMENT_BYTES // 1024} KB."
+            )
+
+        text = decode_attachment_text(content, attachment.filename).strip()
+        if text:
+            parts.append(f"Datei {attachment.filename}:\n{text}")
+
+    if parts:
+        return "\n\n".join(parts).strip()
+
+    if skipped_files:
+        allowed = ", ".join(sorted(TEXT_ATTACHMENT_EXTENSIONS))
+        raise AttachmentInputError(
+            "Ich kann fuer diesen Befehl nur Textdateien lesen. "
+            f"Erlaubte Endungen: {allowed}."
+        )
+
+    return ""
+
+
+async def read_attachment_bytes(attachment: discord.Attachment) -> bytes:
+    try:
+        return await attachment.read()
+    except discord.HTTPException as original_exc:
+        try:
+            return await attachment.read(use_cached=True)
+        except discord.HTTPException:
+            raise original_exc
+
+
+def is_text_attachment(attachment: discord.Attachment) -> bool:
+    content_type = (getattr(attachment, "content_type", None) or "").split(";")[0].strip().lower()
+    if content_type.startswith("text/") or content_type in TEXT_ATTACHMENT_CONTENT_TYPES:
+        return True
+    return Path(attachment.filename).suffix.lower() in TEXT_ATTACHMENT_EXTENSIONS
+
+
+def decode_attachment_text(content: bytes, filename: str) -> str:
+    if b"\x00" in content:
+        raise AttachmentInputError(f"`{filename}` sieht nicht wie eine Textdatei aus.")
+
+    for encoding in ("utf-8-sig", "utf-8", "cp1252"):
+        try:
+            return content.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+
+    raise AttachmentInputError(f"`{filename}` konnte nicht als Text gelesen werden.")
 
 
 def code_block(source: str) -> str:

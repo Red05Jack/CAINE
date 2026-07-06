@@ -54,6 +54,7 @@ class PluginManager:
         self.bot = bot
         self.pending_dir = pending_dir
         self.approved_dir = approved_dir
+        self.archive_dir = approved_dir.parent / "archive"
         self.data_dir = data_dir
         self.trusted_plugins = trusted_plugins
         self.loaded: dict[str, LoadedPlugin] = {}
@@ -61,6 +62,7 @@ class PluginManager:
         self._plugin_listeners: dict[str, list[tuple[str, Any]]] = {}
         self._plugin_subscriptions: dict[str, list[tuple[str, Any]]] = {}
         self._topic_handlers: dict[str, list[tuple[str, Any]]] = {}
+        self._released_builtin_commands: dict[str, commands.Command] = {}
         self.shared: dict[str, Any] = {}
 
     def ensure_dirs(self) -> None:
@@ -182,16 +184,17 @@ class PluginManager:
             raise PluginValidationError(validation.summary())
         meta = self._read_pending_meta(source_path)
         replace_plugin_id = self._replacement_plugin_id(meta)
+        target = self.approved_dir / f"{replace_plugin_id or source_path.stem}.py"
+        if replace_plugin_id is None and target.exists():
+            replace_plugin_id = source_path.stem
+
         conflicts = self._command_conflicts(validation.command_names, replace_plugin_id)
         if conflicts:
             raise PluginValidationError(f"command already exists: {', '.join(conflicts)}")
 
         if replace_plugin_id is not None:
-            return await self._approve_replacement(source_path, source, validation, replace_plugin_id)
+            return await self._approve_replacement(source_path, validation, replace_plugin_id)
 
-        target = self.approved_dir / f"{source_path.stem}.py"
-        if target.exists():
-            target = self.approved_dir / f"{self._unique_slug(source_path.stem, self.approved_dir)}.py"
         shutil.move(str(source_path), str(target))
         try:
             return await self.load_plugin_file(target, validation)
@@ -280,6 +283,7 @@ class PluginManager:
     def unload_plugin(self, plugin_name: str) -> None:
         for command_name in self._plugin_commands.pop(plugin_name, []):
             self.bot.remove_command(command_name)
+            self._restore_builtin_command_if_unused(command_name)
         for event_name, handler in self._plugin_listeners.pop(plugin_name, []):
             self.bot.remove_listener(handler, event_name)
         for topic, handler in self._plugin_subscriptions.pop(plugin_name, []):
@@ -293,28 +297,36 @@ class PluginManager:
 
     def _register_command(self, plugin_name: str, command: commands.Command) -> None:
         if command.name in self.bot.all_commands:
-            raise PluginValidationError(f"command '{command.name}' already exists")
+            if self._is_releasable_builtin_command(command.name):
+                self._release_builtin_command(command.name)
+            else:
+                raise PluginValidationError(f"command '{command.name}' already exists")
         self.bot.add_command(command)
         self._plugin_commands.setdefault(plugin_name, []).append(command.name)
 
     async def _approve_replacement(
         self,
         source_path: Path,
-        source: str,
         validation: ValidationResult,
         replace_plugin_id: str,
     ) -> LoadedPlugin:
         target = self.approved_dir / f"{replace_plugin_id}.py"
-        old_source = target.read_text(encoding="utf-8") if target.exists() else None
-        target.write_text(source, encoding="utf-8")
+        archived_path = self._archive_approved_plugin(target)
+        moved_pending = False
 
         try:
+            shutil.move(str(source_path), str(target))
+            moved_pending = True
             loaded = await self.load_plugin_file(target, validation, forced_plugin_name=replace_plugin_id)
         except Exception:
-            if old_source is None:
-                target.unlink(missing_ok=True)
-            else:
-                target.write_text(old_source, encoding="utf-8")
+            self.unload_plugin(replace_plugin_id)
+            if moved_pending and target.exists():
+                if source_path.exists():
+                    target.unlink(missing_ok=True)
+                else:
+                    shutil.move(str(target), str(source_path))
+            if archived_path is not None and archived_path.exists():
+                shutil.move(str(archived_path), str(target))
                 try:
                     await self.load_plugin_file(target, forced_plugin_name=replace_plugin_id)
                 except Exception as restore_exc:
@@ -335,7 +347,45 @@ class PluginManager:
             name
             for name in command_names
             if name in self.bot.all_commands and name not in allowed_existing
+            and not self._is_releasable_builtin_command(name)
         ]
+
+    def _archive_approved_plugin(self, target: Path) -> Path | None:
+        if not target.exists():
+            return None
+
+        self.archive_dir.mkdir(parents=True, exist_ok=True)
+        index = 1
+        while True:
+            archive_path = self.archive_dir / f"{target.stem}V{index}{target.suffix}"
+            if not archive_path.exists():
+                shutil.move(str(target), str(archive_path))
+                return archive_path
+            index += 1
+
+    def _is_releasable_builtin_command(self, command_name: str) -> bool:
+        if command_name != "help":
+            return False
+        command = self.bot.all_commands.get(command_name)
+        if command is None:
+            return False
+        callback = getattr(command, "callback", None)
+        return (
+            getattr(command, "module", "") == "discord.ext.commands.help"
+            and getattr(callback, "__qualname__", "") == "HelpCommand.command_callback"
+        )
+
+    def _release_builtin_command(self, command_name: str) -> None:
+        removed = self.bot.remove_command(command_name)
+        if removed is not None:
+            self._released_builtin_commands.setdefault(command_name, removed)
+
+    def _restore_builtin_command_if_unused(self, command_name: str) -> None:
+        command = self._released_builtin_commands.get(command_name)
+        if command is None or command_name in self.bot.all_commands:
+            return
+        self.bot.add_command(command)
+        self._released_builtin_commands.pop(command_name, None)
 
     def _register_event(self, plugin_name: str, event_name: str, handler: Any) -> None:
         self.bot.add_listener(handler, event_name)
