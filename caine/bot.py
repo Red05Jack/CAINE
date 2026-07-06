@@ -147,6 +147,57 @@ def install_commands(bot: CaineBot) -> None:
             mention_author=False,
         )
 
+    @bot.command(name="evolve_plugin", aliases=["modify_plugin", "update_plugin", "erweitere"])
+    @in_allowed_guild()
+    @is_caine_admin()
+    async def evolve_plugin(ctx: commands.Context, plugin_id: str, *, request: str) -> None:
+        """Update an existing plugin and save the new version as pending."""
+        if bot.agent is None:
+            await ctx.reply("OpenAI ist nicht konfiguriert. Setze `OPENAI_API_KEY`.", mention_author=False)
+            return
+
+        source_info = bot.plugins.find_plugin_source(plugin_id)
+        if source_info is None:
+            await ctx.reply(
+                f"Plugin-Datei `{plugin_id}` nicht gefunden. Suche in `plugins/pending` und `plugins/approved`.",
+                mention_author=False,
+            )
+            return
+
+        current_source = source_info.path.read_text(encoding="utf-8")
+        target_plugin_id = source_info.replaces or source_info.plugin_id
+        try:
+            async with ctx.typing():
+                draft = await bot.agent.update_plugin(
+                    target_plugin_id,
+                    current_source,
+                    request,
+                    ctx.author.display_name,
+                )
+                pending_id, path, validation = bot.plugins.save_pending_revision(
+                    target_plugin_id,
+                    draft.code,
+                    source_info.path,
+                )
+        except OpenAIError as exc:
+            await ctx.reply(f"OpenAI-Fehler beim Bearbeiten: `{str(exc)[:700]}`", mention_author=False)
+            return
+
+        status = "bereit fuer Review" if validation.ok else "Validator hat Probleme gefunden"
+        await ctx.reply(
+            "\n".join(
+                [
+                    f"Update fuer `{target_plugin_id}` als pending `{pending_id}` gespeichert: {status}.",
+                    f"Quelle: `{relative(source_info.path, bot.settings.project_root)}` ({source_info.location})",
+                    f"Neue Datei: `{relative(path, bot.settings.project_root)}`",
+                    f"Aenderung: {draft.change_summary}",
+                    f"Validation: `{validation.summary()}`",
+                    f"Aktivieren/alte Version ersetzen mit `{bot.settings.command_prefix}approve {pending_id}`.",
+                ]
+            )[:1900],
+            mention_author=False,
+        )
+
     @bot.command(name="pending")
     @in_allowed_guild()
     @is_caine_admin()
@@ -160,7 +211,10 @@ def install_commands(bot: CaineBot) -> None:
         for plugin_id, _, validation in items:
             marker = "OK" if validation.ok else "FEHLER"
             description = validation.metadata.get("description", "ohne Beschreibung")
-            lines.append(f"- `{plugin_id}` [{marker}] {description}")
+            meta = bot.plugins.pending_metadata(plugin_id)
+            replaces = meta.get("target_plugin_id")
+            suffix = f" -> ersetzt `{replaces}`" if replaces else ""
+            lines.append(f"- `{plugin_id}` [{marker}] {description}{suffix}")
         await ctx.reply("\n".join(lines)[:1900], mention_author=False)
 
     @bot.command(name="review")

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from difflib import SequenceMatcher
 import importlib.util
 import inspect
+import json
 import logging
 import re
 import shutil
@@ -30,6 +32,14 @@ class LoadedPlugin:
     path: Path
     description: str
     commands: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class PluginSource:
+    plugin_id: str
+    path: Path
+    location: str
+    replaces: str | None = None
 
 
 class PluginManager:
@@ -64,6 +74,38 @@ class PluginManager:
         path = self.pending_dir / f"{slug}.py"
         path.write_text(source, encoding="utf-8")
         return slug, path, self.validate_source(source)
+
+    def save_pending_revision(
+        self,
+        plugin_id: str,
+        source: str,
+        source_path: Path,
+    ) -> tuple[str, Path, ValidationResult]:
+        self.ensure_dirs()
+        target_plugin_id = slugify(plugin_id)
+        preferred_path = self.pending_dir / f"{target_plugin_id}.py"
+
+        if _same_path(source_path, preferred_path):
+            pending_id = target_plugin_id
+            path = preferred_path
+        elif preferred_path.exists():
+            pending_id = self._unique_slug(f"{target_plugin_id}_update", self.pending_dir)
+            path = self.pending_dir / f"{pending_id}.py"
+        else:
+            pending_id = target_plugin_id
+            path = preferred_path
+
+        path.write_text(source, encoding="utf-8")
+        self._write_pending_meta(
+            pending_id,
+            {
+                "action": "replace",
+                "target_plugin_id": target_plugin_id,
+                "target_filename": f"{target_plugin_id}.py",
+                "source_path": str(source_path),
+            },
+        )
+        return pending_id, path, self.validate_source(source)
 
     def list_pending(self) -> list[tuple[str, Path, ValidationResult]]:
         self.ensure_dirs()
@@ -111,6 +153,23 @@ class PluginManager:
         safe_id = slugify(plugin_id)
         return self.pending_dir / f"{safe_id}.py"
 
+    def pending_metadata(self, plugin_id: str) -> dict[str, Any]:
+        return self._read_pending_meta(self.pending_path(plugin_id))
+
+    def find_plugin_source(self, plugin_id: str) -> PluginSource | None:
+        safe_id = slugify(plugin_id)
+        pending_path = self.pending_dir / f"{safe_id}.py"
+        if pending_path.exists():
+            meta = self._read_pending_meta(pending_path)
+            replaces = str(meta.get("target_plugin_id") or safe_id)
+            return PluginSource(safe_id, pending_path, "pending", replaces)
+
+        approved_path = self.approved_dir / f"{safe_id}.py"
+        if approved_path.exists():
+            return PluginSource(safe_id, approved_path, "approved", safe_id)
+
+        return self._find_plugin_source_by_metadata(plugin_id)
+
     async def approve(self, plugin_id: str) -> LoadedPlugin:
         self.ensure_dirs()
         source_path = self.pending_path(plugin_id)
@@ -121,14 +180,18 @@ class PluginManager:
         validation = self.validate_source(source)
         if not validation.ok:
             raise PluginValidationError(validation.summary())
-        conflicts = [name for name in validation.command_names if name in self.bot.all_commands]
+        meta = self._read_pending_meta(source_path)
+        replace_plugin_id = self._replacement_plugin_id(meta)
+        conflicts = self._command_conflicts(validation.command_names, replace_plugin_id)
         if conflicts:
             raise PluginValidationError(f"command already exists: {', '.join(conflicts)}")
+
+        if replace_plugin_id is not None:
+            return await self._approve_replacement(source_path, source, validation, replace_plugin_id)
 
         target = self.approved_dir / f"{source_path.stem}.py"
         if target.exists():
             target = self.approved_dir / f"{self._unique_slug(source_path.stem, self.approved_dir)}.py"
-
         shutil.move(str(source_path), str(target))
         try:
             return await self.load_plugin_file(target, validation)
@@ -163,13 +226,14 @@ class PluginManager:
         self,
         path: Path,
         validation: ValidationResult | None = None,
+        forced_plugin_name: str | None = None,
     ) -> LoadedPlugin:
         source = path.read_text(encoding="utf-8")
         validation = validation or self.validate_source(source)
         if not validation.ok:
             raise PluginValidationError(validation.summary())
         metadata = validation.metadata or extract_plugin_metadata(source)
-        plugin_name = slugify(metadata.get("name") or path.stem)
+        plugin_name = slugify(forced_plugin_name or metadata.get("name") or path.stem)
 
         self.unload_plugin(plugin_name)
         module_name = f"caine_runtime_plugins.{plugin_name}_{abs(hash(path))}"
@@ -233,6 +297,46 @@ class PluginManager:
         self.bot.add_command(command)
         self._plugin_commands.setdefault(plugin_name, []).append(command.name)
 
+    async def _approve_replacement(
+        self,
+        source_path: Path,
+        source: str,
+        validation: ValidationResult,
+        replace_plugin_id: str,
+    ) -> LoadedPlugin:
+        target = self.approved_dir / f"{replace_plugin_id}.py"
+        old_source = target.read_text(encoding="utf-8") if target.exists() else None
+        target.write_text(source, encoding="utf-8")
+
+        try:
+            loaded = await self.load_plugin_file(target, validation, forced_plugin_name=replace_plugin_id)
+        except Exception:
+            if old_source is None:
+                target.unlink(missing_ok=True)
+            else:
+                target.write_text(old_source, encoding="utf-8")
+                try:
+                    await self.load_plugin_file(target, forced_plugin_name=replace_plugin_id)
+                except Exception as restore_exc:
+                    log.warning("could not reload previous plugin %s: %s", replace_plugin_id, restore_exc)
+            raise
+
+        source_path.unlink(missing_ok=True)
+        self._pending_meta_path(source_path.stem).unlink(missing_ok=True)
+        return loaded
+
+    def _command_conflicts(
+        self,
+        command_names: list[str],
+        replace_plugin_id: str | None = None,
+    ) -> list[str]:
+        allowed_existing = set(self._plugin_commands.get(replace_plugin_id or "", []))
+        return [
+            name
+            for name in command_names
+            if name in self.bot.all_commands and name not in allowed_existing
+        ]
+
     def _register_event(self, plugin_name: str, event_name: str, handler: Any) -> None:
         self.bot.add_listener(handler, event_name)
         self._plugin_listeners.setdefault(plugin_name, []).append((event_name, handler))
@@ -255,6 +359,63 @@ class PluginManager:
             results.append(result)
         return results
 
+    def _pending_meta_path(self, plugin_id: str) -> Path:
+        return self.pending_dir / f"{slugify(plugin_id)}.meta.json"
+
+    def _read_pending_meta(self, pending_path: Path) -> dict[str, Any]:
+        meta_path = self._pending_meta_path(pending_path.stem)
+        if not meta_path.exists():
+            return {}
+        try:
+            with meta_path.open("r", encoding="utf-8") as handle:
+                data = json.load(handle)
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def _write_pending_meta(self, plugin_id: str, data: dict[str, Any]) -> None:
+        with self._pending_meta_path(plugin_id).open("w", encoding="utf-8") as handle:
+            json.dump(data, handle, indent=2, ensure_ascii=True)
+
+    def _replacement_plugin_id(self, meta: dict[str, Any]) -> str | None:
+        if meta.get("action") != "replace":
+            return None
+        value = str(meta.get("target_plugin_id") or "").strip()
+        return slugify(value) or None
+
+    def _find_plugin_source_by_metadata(self, plugin_id: str) -> PluginSource | None:
+        query = _compact_slug(slugify(plugin_id))
+        if not query:
+            return None
+
+        best: tuple[float, PluginSource] | None = None
+        for location, folder in (("pending", self.pending_dir), ("approved", self.approved_dir)):
+            for path in sorted(folder.glob("*.py")):
+                try:
+                    source = path.read_text(encoding="utf-8")
+                except OSError:
+                    continue
+                validation = self.validate_source(source)
+                metadata = validation.metadata or extract_plugin_metadata(source)
+                meta = self._read_pending_meta(path) if location == "pending" else {}
+                target_plugin_id = str(meta.get("target_plugin_id") or path.stem)
+
+                candidates = [path.stem, slugify(metadata.get("name", ""))]
+                candidates.extend(validation.command_names)
+                score = max((_match_score(query, candidate) for candidate in candidates), default=0.0)
+                if score < 0.72:
+                    continue
+                source_info = PluginSource(
+                    plugin_id=path.stem,
+                    path=path,
+                    location=location,
+                    replaces=slugify(target_plugin_id),
+                )
+                if best is None or score > best[0]:
+                    best = (score, source_info)
+
+        return best[1] if best else None
+
     def _unique_slug(self, suggested_name: str, folder: Path) -> str:
         base = slugify(suggested_name) or "generated_plugin"
         candidate = base
@@ -272,3 +433,25 @@ def slugify(value: str) -> str:
     if value and value[0].isdigit():
         value = f"plugin_{value}"
     return value[:64]
+
+
+def _same_path(left: Path, right: Path) -> bool:
+    try:
+        return left.resolve() == right.resolve()
+    except OSError:
+        return False
+
+
+def _compact_slug(value: str) -> str:
+    return slugify(value).replace("_", "")
+
+
+def _match_score(query: str, candidate: str) -> float:
+    compact = _compact_slug(candidate)
+    if not compact:
+        return 0.0
+    if query == compact:
+        return 1.0
+    if query in compact or compact in query:
+        return 0.9
+    return SequenceMatcher(None, query, compact).ratio()

@@ -10,6 +10,8 @@ erst nach Admin-Freigabe geladen.
 
 - `!ask <frage>`: Antwort ueber OpenAI.
 - `!evolve <wunsch>`: erzeugt einen Plugin-Vorschlag aus einer Beschreibung.
+- `!evolve_plugin <plugin_id> <wunsch>`: liest ein vorhandenes Plugin und
+  speichert eine geaenderte Version in `plugins/pending`.
 - `!pending`: zeigt wartende Plugin-Vorschlaege.
 - `!review <plugin_id>`: zeigt den Code eines Vorschlags.
 - `!approve <plugin_id>`: validiert, verschiebt und laedt ein Plugin.
@@ -51,6 +53,33 @@ Trusted Plugins bekommen zusaetzlich:
 - `await api.storage_get/set/delete(...)`: persistenter Plugin-Speicher.
 
 Dieser Modus bedeutet: approved Plugins koennen alles, was der Bot-Prozess kann.
+
+## Bestehende Plugins erweitern
+
+Mit Trusted Plugins kann C.A.I.N.E. bestehende Plugin-Dateien lesen und daraus
+eine neue Version erzeugen:
+
+```text
+!evolve_plugin levelxp fuege ein leaderboard mit top 10 hinzu
+```
+
+Der Bot sucht zuerst in `plugins/pending`, danach in `plugins/approved`. Die
+neue Version landet wieder in `plugins/pending` und bekommt eine Meta-Datei,
+die sagt, welche approved-Datei sie ersetzt. Nach dem Review:
+
+```text
+!approve levelxp
+```
+
+Falls die pending-Datei z.B. `levelxp_update` heisst:
+
+```text
+!approve levelxp_update
+```
+
+Beim Approval wird `plugins/approved/levelxp.py` ueberschrieben und das Plugin
+neu geladen. Wenn das Laden fehlschlaegt, versucht C.A.I.N.E. die vorherige
+approved-Version wiederherzustellen.
 
 ## Installation
 
