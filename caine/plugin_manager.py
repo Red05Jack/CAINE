@@ -24,6 +24,7 @@ from caine.plugin_validation import (
 
 log = logging.getLogger(__name__)
 SLUG_RE = re.compile(r"[^a-z0-9_]+")
+RESERVED_PLUGIN_COMMAND_NAMES = {"help"}
 
 
 @dataclass
@@ -62,7 +63,6 @@ class PluginManager:
         self._plugin_listeners: dict[str, list[tuple[str, Any]]] = {}
         self._plugin_subscriptions: dict[str, list[tuple[str, Any]]] = {}
         self._topic_handlers: dict[str, list[tuple[str, Any]]] = {}
-        self._released_builtin_commands: dict[str, commands.Command] = {}
         self.shared: dict[str, Any] = {}
 
     def ensure_dirs(self) -> None:
@@ -283,7 +283,6 @@ class PluginManager:
     def unload_plugin(self, plugin_name: str) -> None:
         for command_name in self._plugin_commands.pop(plugin_name, []):
             self.bot.remove_command(command_name)
-            self._restore_builtin_command_if_unused(command_name)
         for event_name, handler in self._plugin_listeners.pop(plugin_name, []):
             self.bot.remove_listener(handler, event_name)
         for topic, handler in self._plugin_subscriptions.pop(plugin_name, []):
@@ -296,11 +295,11 @@ class PluginManager:
         self.loaded.pop(plugin_name, None)
 
     def _register_command(self, plugin_name: str, command: commands.Command) -> None:
+        if command.name in RESERVED_PLUGIN_COMMAND_NAMES:
+            log.info("plugin %s command '%s' is reserved and was skipped", plugin_name, command.name)
+            return
         if command.name in self.bot.all_commands:
-            if self._is_releasable_builtin_command(command.name):
-                self._release_builtin_command(command.name)
-            else:
-                raise PluginValidationError(f"command '{command.name}' already exists")
+            raise PluginValidationError(f"command '{command.name}' already exists")
         self.bot.add_command(command)
         self._plugin_commands.setdefault(plugin_name, []).append(command.name)
 
@@ -347,7 +346,7 @@ class PluginManager:
             name
             for name in command_names
             if name in self.bot.all_commands and name not in allowed_existing
-            and not self._is_releasable_builtin_command(name)
+            and name not in RESERVED_PLUGIN_COMMAND_NAMES
         ]
 
     def _archive_approved_plugin(self, target: Path) -> Path | None:
@@ -362,30 +361,6 @@ class PluginManager:
                 shutil.move(str(target), str(archive_path))
                 return archive_path
             index += 1
-
-    def _is_releasable_builtin_command(self, command_name: str) -> bool:
-        if command_name != "help":
-            return False
-        command = self.bot.all_commands.get(command_name)
-        if command is None:
-            return False
-        callback = getattr(command, "callback", None)
-        return (
-            getattr(command, "module", "") == "discord.ext.commands.help"
-            and getattr(callback, "__qualname__", "") == "HelpCommand.command_callback"
-        )
-
-    def _release_builtin_command(self, command_name: str) -> None:
-        removed = self.bot.remove_command(command_name)
-        if removed is not None:
-            self._released_builtin_commands.setdefault(command_name, removed)
-
-    def _restore_builtin_command_if_unused(self, command_name: str) -> None:
-        command = self._released_builtin_commands.get(command_name)
-        if command is None or command_name in self.bot.all_commands:
-            return
-        self.bot.add_command(command)
-        self._released_builtin_commands.pop(command_name, None)
 
     def _register_event(self, plugin_name: str, event_name: str, handler: Any) -> None:
         self.bot.add_listener(handler, event_name)

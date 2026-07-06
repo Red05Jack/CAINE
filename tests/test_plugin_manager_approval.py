@@ -81,18 +81,14 @@ def test_approve_existing_plugin_archives_old_version_and_moves_pending(tmp_path
     assert archive_path.read_text(encoding="utf-8") == OLD_PLUGIN
 
 
-def test_plugin_can_replace_builtin_help_command(tmp_path):
+def test_plugin_help_command_is_reserved_for_global_help(tmp_path):
     bot = make_bot()
     manager = make_manager(tmp_path, bot)
     manager.ensure_dirs()
-    assert "help" in bot.all_commands
+    original_help = bot.all_commands["help"]
 
     manager.save_pending("circus_help", HELP_PLUGIN)
     loaded = run(manager.approve("circus_help"))
 
-    assert loaded.commands == ["help"]
-    assert bot.all_commands["help"].module != "discord.ext.commands.help"
-
-    manager.unload_plugin("circus_help")
-
-    assert bot.all_commands["help"].module == "discord.ext.commands.help"
+    assert loaded.commands == []
+    assert bot.all_commands["help"] is original_help

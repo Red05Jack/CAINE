@@ -8,6 +8,8 @@ erst nach Admin-Freigabe geladen.
 
 ## Was der Bot kann
 
+- `!help`: zeigt normale CAINE-Commands gruppiert und listet geladene Plugins.
+- `!help <pluginname>`: zeigt die genauen Commands eines geladenen Plugins.
 - `!ask <frage>`: Antwort ueber OpenAI.
 - `!evolve <wunsch>`: erzeugt einen Plugin-Vorschlag aus einer Beschreibung.
   Der Wunsch kann auch komplett in einer angehaengten Textdatei stehen.

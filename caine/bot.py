@@ -9,7 +9,7 @@ from openai import OpenAIError
 
 from caine.config import Settings, load_settings
 from caine.openai_agent import OpenAIAgent
-from caine.plugin_manager import PluginManager
+from caine.plugin_manager import PluginManager, slugify
 from caine.plugin_validation import PluginValidationError, validate_plugin_source
 
 
@@ -44,6 +44,27 @@ class AttachmentInputError(ValueError):
     pass
 
 
+CORE_HELP_GROUPS = (
+    ("Allgemein", ("help", "ask", "plugins")),
+    ("Plugin-Werkstatt", ("evolve", "evolve_plugin", "pending", "review", "approve", "reject", "reload_plugins")),
+    ("System", ("health",)),
+)
+
+CORE_COMMAND_DESCRIPTIONS = {
+    "help": "Zeigt diese Uebersicht oder Details zu einem Plugin.",
+    "ask": "Fragt C.A.I.N.E. ueber OpenAI.",
+    "plugins": "Listet geladene Plugins.",
+    "evolve": "Erzeugt einen neuen pending Plugin-Vorschlag.",
+    "evolve_plugin": "Erzeugt eine pending Aenderung fuer ein bestehendes Plugin.",
+    "pending": "Listet wartende Plugin-Vorschlaege.",
+    "review": "Zeigt den Code eines pending Plugins.",
+    "approve": "Aktiviert ein pending Plugin.",
+    "reject": "Loescht einen pending Plugin-Vorschlag.",
+    "reload_plugins": "Laedt approved Plugins neu.",
+    "health": "Prueft den CAINE-Laufzeitstatus.",
+}
+
+
 class CaineBot(commands.Bot):
     def __init__(self, settings: Settings) -> None:
         intents = discord.Intents.default()
@@ -52,7 +73,7 @@ class CaineBot(commands.Bot):
         super().__init__(
             command_prefix=settings.command_prefix,
             intents=intents,
-            help_command=commands.DefaultHelpCommand(no_category="CAINE"),
+            help_command=None,
         )
         self.settings = settings
         self.agent = (
@@ -128,6 +149,25 @@ def in_allowed_guild() -> commands.Check:
 
 
 def install_commands(bot: CaineBot) -> None:
+    @bot.command(name="help", aliases=["hilfe"])
+    @in_allowed_guild()
+    async def caine_help(ctx: commands.Context, *, topic: str = "") -> None:
+        """Show grouped CAINE help."""
+        topic = clean_help_topic(topic)
+        if topic:
+            plugin_help = build_plugin_help_text(bot, topic)
+            if plugin_help is None:
+                plugin_names = ", ".join(f"`{plugin.name}`" for plugin in sorted(bot.plugins.loaded.values(), key=lambda item: item.name))
+                await ctx.reply(
+                    f"Plugin `{topic}` nicht gefunden. Geladene Plugins: {plugin_names or 'keine'}.",
+                    mention_author=False,
+                )
+                return
+            await send_long(ctx, plugin_help)
+            return
+
+        await send_long(ctx, build_general_help_text(bot))
+
     @bot.command(name="ask", aliases=["frag"])
     @in_allowed_guild()
     async def ask(ctx: commands.Context, *, prompt: str) -> None:
@@ -367,6 +407,140 @@ async def send_long(ctx: commands.Context, content: str) -> None:
     chunks = [content[index : index + 1900] for index in range(0, len(content), 1900)] or [""]
     for chunk in chunks[:5]:
         await ctx.reply(chunk, mention_author=False)
+
+
+def build_general_help_text(bot: commands.Bot) -> str:
+    prefix = bot_command_prefix(bot)
+    plugin_command_names = loaded_plugin_command_names(bot)
+    grouped_names: set[str] = set()
+    lines = [
+        "CAINE Help",
+        "",
+        "Normale Commands:",
+    ]
+
+    for group_name, command_names in CORE_HELP_GROUPS:
+        group_lines = []
+        for command_name in command_names:
+            command = bot.get_command(command_name)
+            if command is None or command.hidden or command.name in plugin_command_names:
+                continue
+            grouped_names.add(command.name)
+            group_lines.append(format_command_help_line(command, prefix))
+        if group_lines:
+            lines.append(f"\n{group_name}:")
+            lines.extend(group_lines)
+
+    extra_commands = sorted(
+        (
+            command
+            for command in bot.commands
+            if command.name not in grouped_names
+            and command.name not in plugin_command_names
+            and not command.hidden
+        ),
+        key=lambda command: command.name,
+    )
+    if extra_commands:
+        lines.append("\nWeitere:")
+        lines.extend(format_command_help_line(command, prefix) for command in extra_commands)
+
+    lines.append("\nPlugins:")
+    plugins = sorted(getattr(getattr(bot, "plugins", None), "loaded", {}).values(), key=lambda plugin: plugin.name)
+    if not plugins:
+        lines.append("- Keine Plugins geladen.")
+    for plugin in plugins:
+        command_count = len(registered_plugin_commands(bot, plugin))
+        description = plugin.description or "ohne Beschreibung"
+        lines.append(
+            f"- `{plugin.name}` ({command_count} Commands): {description} "
+            f"Details: `{prefix}help {plugin.name}`"
+        )
+
+    return "\n".join(lines)[:3900]
+
+
+def build_plugin_help_text(bot: commands.Bot, plugin_query: str) -> str | None:
+    plugin = find_loaded_plugin(bot, plugin_query)
+    if plugin is None:
+        return None
+
+    prefix = bot_command_prefix(bot)
+    lines = [
+        f"Plugin `{plugin.name}`",
+        plugin.description or "ohne Beschreibung",
+        "",
+        "Commands:",
+    ]
+    commands_for_plugin = registered_plugin_commands(bot, plugin)
+    if not commands_for_plugin:
+        lines.append("- Keine registrierten Commands.")
+    else:
+        lines.extend(format_command_help_line(command, prefix) for command in commands_for_plugin)
+
+    return "\n".join(lines)[:3900]
+
+
+def registered_plugin_commands(bot: commands.Bot, plugin: object) -> list[commands.Command]:
+    result = []
+    for command_name in getattr(plugin, "commands", []):
+        command = bot.get_command(command_name)
+        if command is not None and not command.hidden:
+            result.append(command)
+    return sorted(result, key=lambda command: command.name)
+
+
+def loaded_plugin_command_names(bot: commands.Bot) -> set[str]:
+    manager = getattr(bot, "plugins", None)
+    loaded = getattr(manager, "loaded", {})
+    return {
+        command_name
+        for plugin in loaded.values()
+        for command_name in getattr(plugin, "commands", [])
+    }
+
+
+def find_loaded_plugin(bot: commands.Bot, plugin_query: str) -> object | None:
+    query = slugify(clean_help_topic(plugin_query))
+    if not query:
+        return None
+
+    manager = getattr(bot, "plugins", None)
+    plugins = sorted(getattr(manager, "loaded", {}).values(), key=lambda plugin: plugin.name)
+    for plugin in plugins:
+        candidates = {plugin.name, slugify(plugin.path.stem), slugify(plugin.description)}
+        if query in candidates:
+            return plugin
+
+    for plugin in plugins:
+        if query in {slugify(command_name) for command_name in plugin.commands}:
+            return plugin
+
+    for plugin in plugins:
+        candidates = {plugin.name, slugify(plugin.path.stem), slugify(plugin.description)}
+        if any(query in candidate or candidate in query for candidate in candidates if candidate):
+            return plugin
+
+    return None
+
+
+def format_command_help_line(command: commands.Command, prefix: str) -> str:
+    aliases = [alias for alias in command.aliases if alias != command.name]
+    alias_text = ""
+    if aliases:
+        alias_values = ", ".join(f"`{prefix}{alias}`" for alias in aliases)
+        alias_text = f" (Aliase: {alias_values})"
+    description = CORE_COMMAND_DESCRIPTIONS.get(command.name) or command.help or command.short_doc or "ohne Beschreibung"
+    return f"- `{prefix}{command.name}`{alias_text}: {description}"
+
+
+def bot_command_prefix(bot: commands.Bot) -> str:
+    settings = getattr(bot, "settings", None)
+    return str(getattr(settings, "command_prefix", "!") or "!")
+
+
+def clean_help_topic(topic: str) -> str:
+    return topic.strip().strip("\"'")
 
 
 async def request_text_from_message(ctx: commands.Context, request: str = "") -> str:

@@ -510,6 +510,8 @@ class OpenAIAgent:
                 - The file must define PLUGIN = {"name": "...", "description": "..."}.
                 - The file must define async def setup_plugin(api): ...
                 - Register commands with @api.command("command_name", description="...").
+                - Do not register a command named "help"; CAINE provides
+                  global plugin details through !help <pluginname>.
                 - Command handlers must be async def handler(ctx, args): ...
                 - Register Discord listeners with @api.event("message"),
                   @api.event("voice_state_update"), or any discord.py event name.
@@ -539,6 +541,8 @@ class OpenAIAgent:
             - The file must define PLUGIN = {"name": "...", "description": "..."}.
             - The file must define async def setup_plugin(api): ...
             - Register at least one command with @api.command("command_name", description="...").
+            - Do not register a command named "help"; CAINE provides global
+              plugin details through !help <pluginname>.
             - Command handlers must be async def handler(ctx, args): ...
             - Send messages with await api.reply(ctx, "...") or await api.send(ctx, "...").
             - Use await api.storage_get/set/delete for tiny persistent state.
