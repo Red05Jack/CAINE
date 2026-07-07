@@ -65,6 +65,32 @@ async def setup_plugin(api):
     assert '"type": "user"' in normalized
 
 
+def test_plugin_level_shared_api_and_emit_are_allowed():
+    result = validate_plugin_source(
+        """
+PLUGIN = {"name": "demo_api", "description": "Demo API."}
+
+
+async def setup_plugin(api):
+    state = {"count": 0}
+
+    def current_count():
+        return state["count"]
+
+    api.shared["demo_api.api"] = {"current_count": current_count}
+
+    @api.command({"names": ["demo-api"], "description": "Use demo.", "level": "user"})
+    async def demo_api(ctx, args):
+        state["count"] = state["count"] + 1
+        await api.emit("demo_api.used", {"count": state["count"]})
+        await api.reply(ctx, "ok")
+"""
+    )
+
+    assert result.ok
+    assert result.command_names == ["demo-api"]
+
+
 def test_banned_import_fails():
     result = validate_plugin_source(
         """

@@ -106,7 +106,10 @@ CAINE_INSPIRED_PLUGIN_BOT_INSTRUCTIONS = dedent(
     Erklaere in 2-4 Saetzen, was das Plugin macht.
 
     ## Discord-Befehle
-    Liste sinnvolle Slash-Commands auf.
+    Liste sinnvolle Slash-Commands auf und gruppiere sie nach:
+    - Commands / Nutzer
+    - Admin commands / Moderation
+    - Kinger / Master
 
     Beispiel:
     - `/plugin start`
@@ -118,6 +121,16 @@ CAINE_INSPIRED_PLUGIN_BOT_INSTRUCTIONS = dedent(
     - Zweck
     - Parameter
     - Beispiel
+    - Zugriffslevel S3/S2/S1
+
+    ## Python-Schnittstelle fuer andere Plugins
+    Beschreibe, welche Funktionen, Topics oder Events andere Plugins nutzen
+    koennen.
+
+    Beispiele:
+    - `api.shared["plugin_id.api"]`
+    - `await api.emit("plugin_id.event", payload)`
+    - `@api.on("plugin_id.topic")` fuer trusted Plugins
 
     ## Events & Trigger
     Erklaere, wann das Plugin automatisch reagiert.
@@ -254,15 +267,16 @@ CAINE_INSPIRED_PLUGIN_BOT_INSTRUCTIONS = dedent(
     1. Theatralische Kurzbegruessung
     2. Plugin-Steckbrief
     3. Commands
-    4. Events
-    5. Config
-    6. Datenmodell
-    7. Permissions
-    8. Ablauf
-    9. Fehlerfaelle
-    10. Sicherheitsregeln
-    11. Optionaler Code-Skeleton
-    12. Kurzer Showmaster-Abschluss
+    4. Python-Schnittstelle fuer andere Plugins
+    5. Events
+    6. Config
+    7. Datenmodell
+    8. Permissions
+    9. Ablauf
+    10. Fehlerfaelle
+    11. Sicherheitsregeln
+    12. Optionaler Code-Skeleton
+    13. Kurzer Showmaster-Abschluss
 
     # AUSGABEFORMAT FUER CODE
 
@@ -329,6 +343,53 @@ CAINE_INSPIRED_PLUGIN_BOT_INSTRUCTIONS = dedent(
     Dein Ziel ist es, aus vagen Discord-Bot-Ideen konkrete, gut strukturierte,
     technisch realistische Plugin-Konzepte oder Code-Skeletons zu machen - mit
     der Energie eines wahnsinnig gut gelaunten digitalen Zirkusdirektors.
+    """
+).strip()
+
+
+PLUGIN_HIERARCHY_STANDARD = dedent(
+    """
+    # CAINE PLUGIN-HIERARCHIE
+
+    Jedes neu erzeugte Plugin muss als kleine, bedienbare Produktflaeche
+    geplant werden, nicht als einzelner isolierter Befehl.
+
+    Baue die Funktion immer in diese Ebenen:
+
+    1. S3 / Commands / Nutzer:
+       - mindestens ein normaler Nutzerbefehl fuer den eigentlichen Nutzen
+       - klare Parameter, klare Fehlermeldungen, sinnvolle Cooldowns
+       - keine Admin- oder Master-Aktionen in S3-Befehlen
+
+    2. S2 / Admin commands / Moderation:
+       - passende Admin-Befehle, damit Server-Admins die Funktion konfigurieren,
+         moderieren, ein-/ausschalten oder einzelne Nutzerfaelle korrigieren koennen
+       - typische Befehle: status, config, enable, disable, set-channel,
+         set-role, reset-user, remove-entry, log-channel
+       - nutze "level": "admin" fuer diese Befehle
+
+    3. S1 / Kinger / Master:
+       - passende Master-Befehle fuer riskante, globale oder diagnose-lastige
+         Aktionen wie export, import, recalculate, reset-all, audit, debug
+       - nutze "level": "kinger" fuer diese Befehle
+       - wenn ein Plugin wirklich keine riskante Master-Aktion braucht, erzeuge
+         zumindest einen kompakten read-only audit/status/debug-Befehl oder
+         erklaere in safety_notes, warum keine S1-Aktion sinnvoll ist
+
+    4. Python-Ebene fuer andere Plugins:
+       - stelle stabile Funktionen fuer andere Plugins bereit, wenn das Plugin
+         Daten oder Verhalten besitzt, das wiederverwendbar ist
+       - untrusted Plugins: registriere eine kleine Schnittstelle ueber
+         api.shared["plugin_id.api"] = {"funktionsname": funktion}
+       - trusted Plugins: nutze zusaetzlich @api.on("plugin_id.topic") fuer
+         Plugin-Bus-Anfragen und await api.emit("plugin_id.event", payload)
+         fuer Ereignisse
+       - benenne Topics und shared-Keys mit dem Plugin-Namen als Prefix, damit
+         andere Plugins sie gefahrlos finden koennen
+
+    Erzeuge keine One-Command-only-Plugins, ausser der Nutzer verlangt
+    ausdruecklich einen minimalen Prototyp. Auch dann soll safety_notes nennen,
+    welche S2/S1/API-Ebene spaeter ergaenzt werden muesste.
     """
 ).strip()
 
@@ -426,33 +487,7 @@ class OpenAIAgent:
         request: str,
         author_name: str,
     ) -> PluginUpdateDraft:
-        instructions = _instruction_block(
-            CAINE_INSPIRED_PLUGIN_BOT_INSTRUCTIONS,
-            f"""
-            You update an existing Python plugin for a Discord bot.
-
-            Return a complete replacement Python file in the `code` field.
-            Do not return a diff and do not use markdown fences.
-
-            Requirements:
-            - Preserve the existing PLUGIN name unless the user explicitly asks to rename it.
-            - Preserve existing commands and behavior unless the requested change requires edits.
-            - Keep async/sync behavior compatible with the current code.
-            - If the plugin uses api.storage_get/set/delete, keep the await pattern.
-            - If trusted plugin APIs are useful, you may use api.bot, api.manager,
-              api.shared, @api.event(...), @api.on(...), and await api.emit(...).
-            - The result must be valid Python and include setup_plugin(api).
-            - Do not leak or print tokens, environment variables, or secrets.
-
-            Trusted plugin mode is {self.trusted_plugins}.
-            """,
-            """
-            This API call returns a structured object, not a free-form concept.
-            Obey the Python plugin contract and use the showmaster style only
-            where it improves user-facing plugin text, descriptions, and
-            command replies.
-            """,
-        )
+        instructions = self._plugin_update_instructions()
 
         user_input = dedent(
             f"""
@@ -501,6 +536,7 @@ class OpenAIAgent:
         if self.trusted_plugins:
             return _instruction_block(
                 CAINE_INSPIRED_PLUGIN_BOT_INSTRUCTIONS,
+                PLUGIN_HIERARCHY_STANDARD,
                 """
                 You generate trusted Python plugins for a Discord bot.
 
@@ -523,6 +559,9 @@ class OpenAIAgent:
                   "kinger" for S1 Kinger-role-only commands,
                   "admin" for S2 Discord administrator commands,
                   and "user" for S3 public commands.
+                - Build the command surface in the hierarchy from the CAINE
+                  plugin hierarchy: user commands, admin moderation/config
+                  commands, kinger/master commands, and a Python-level API.
                 - Do not register a command named "help"; CAINE provides
                   global plugin details through !help <pluginname>.
                 - Command handlers must be async def handler(ctx, args): ...
@@ -532,6 +571,7 @@ class OpenAIAgent:
                 - Use await api.storage_get/set/delete for small persistent plugin state.
                 - Plugins may access api.bot, api.manager, api.shared, api.data_dir,
                   and discord.py objects directly.
+                - Expose reusable Python helpers through api.shared["plugin_id.api"].
                 - Plugins may communicate via @api.on("topic") and await api.emit("topic", ...).
                 - Keep behavior focused and avoid leaking tokens or secrets.
                 """,
@@ -545,6 +585,7 @@ class OpenAIAgent:
 
         return _instruction_block(
             CAINE_INSPIRED_PLUGIN_BOT_INSTRUCTIONS,
+            PLUGIN_HIERARCHY_STANDARD,
             """
             You generate small Python plugins for a Discord bot.
 
@@ -559,6 +600,10 @@ class OpenAIAgent:
               "level": "user",
               "options": []
               }).
+            - For non-trivial plugins, register a compact hierarchy of commands:
+              one or more "user" commands for normal use, one or more "admin"
+              commands for moderation/config/status, and a "kinger" command for
+              high-trust audit/debug/export/reset behavior when meaningful.
             - Add slash options only when the command truly needs input.
               Option objects are {"name": "...", "description": "...",
               "type": "string|integer|number|boolean|user|channel|role|attachment",
@@ -573,6 +618,11 @@ class OpenAIAgent:
             - Send messages with await api.reply(ctx, "...") or await api.send(ctx, "...").
             - Use await api.storage_get/set/delete for tiny persistent state.
             - Use api.choice for random choices.
+            - Expose a small Python-level API for other plugins through
+              api.shared["plugin_id.api"] = {"function_name": function}.
+            - You may publish simple events with await api.emit("plugin_id.event", payload).
+            - Do not use @api.on(...) in untrusted plugins because the strict
+              validator only allows api.command decorators.
 
             Strict safety rules:
             - Do not import discord, openai, asyncio, aiohttp, requests, os, sys,
@@ -581,14 +631,49 @@ class OpenAIAgent:
             - Do not use eval, exec, compile, open, input, __import__, globals,
               locals, getattr, setattr, vars, classes, while-loops, files,
               network, environment variables, subprocesses, or reflection.
-            - Keep the plugin under 120 lines.
-            - Prefer one focused command.
+            - Keep the plugin compact; if the hierarchy needs several
+              commands, keep each command narrow and predictable.
             """,
             """
             This API call returns a structured object, not a free-form concept.
             The generated code must target this Python runtime even when the
             style guide mentions TypeScript as the generic default. Use the
             showmaster style in user-facing strings where helpful.
+            """,
+        )
+
+    def _plugin_update_instructions(self) -> str:
+        return _instruction_block(
+            CAINE_INSPIRED_PLUGIN_BOT_INSTRUCTIONS,
+            PLUGIN_HIERARCHY_STANDARD,
+            f"""
+            You update an existing Python plugin for a Discord bot.
+
+            Return a complete replacement Python file in the `code` field.
+            Do not return a diff and do not use markdown fences.
+
+            Requirements:
+            - Preserve the existing PLUGIN name unless the user explicitly asks to rename it.
+            - Preserve existing commands and behavior unless the requested change requires edits.
+            - When adding or reshaping behavior, apply the CAINE plugin hierarchy:
+              S3 user commands, S2 admin moderation/config commands, S1 kinger
+              audit/master commands, and a Python-level API for other plugins.
+            - Keep async/sync behavior compatible with the current code.
+            - If the plugin uses api.storage_get/set/delete, keep the await pattern.
+            - If trusted plugin APIs are useful, you may use api.bot, api.manager,
+              api.shared, @api.event(...), @api.on(...), and await api.emit(...).
+            - In untrusted mode, prefer api.shared and await api.emit(...) for
+              plugin-to-plugin integration; do not add @api.on decorators.
+            - The result must be valid Python and include setup_plugin(api).
+            - Do not leak or print tokens, environment variables, or secrets.
+
+            Trusted plugin mode is {self.trusted_plugins}.
+            """,
+            """
+            This API call returns a structured object, not a free-form concept.
+            Obey the Python plugin contract and use the showmaster style only
+            where it improves user-facing plugin text, descriptions, and
+            command replies.
             """,
         )
 
