@@ -65,6 +65,23 @@ async def setup_plugin(api):
     assert '"type": "user"' in normalized
 
 
+def test_command_slash_flag_is_allowed_in_command_object():
+    result = validate_plugin_source(
+        """
+PLUGIN = {"name": "quiet", "description": "Quiet tools."}
+
+
+async def setup_plugin(api):
+    @api.command({"names": ["quiet"], "description": "Prefix-only user command.", "level": "user", "slash": False})
+    async def quiet(ctx, args):
+        await api.reply(ctx, "quiet")
+"""
+    )
+
+    assert result.ok
+    assert result.command_names == ["quiet"]
+
+
 def test_plugin_level_shared_api_and_emit_are_allowed():
     result = validate_plugin_source(
         """

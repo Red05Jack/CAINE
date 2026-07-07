@@ -44,6 +44,7 @@ class CommandSpec:
     level: CommandLevel = CommandLevel.USER
     group: str = "Plugins"
     options: tuple[CommandOption, ...] = ()
+    slash_enabled: bool | None = None
 
     @property
     def name(self) -> str:
@@ -64,6 +65,7 @@ def command_spec(
     aliases: tuple[str, ...] | list[str] = (),
     group: str = "Plugins",
     options: tuple[CommandOption, ...] | list[CommandOption | dict[str, Any]] = (),
+    slash_enabled: bool | None = None,
 ) -> CommandSpec:
     if isinstance(name_or_object, CommandSpec):
         return name_or_object
@@ -78,9 +80,13 @@ def command_spec(
         level = name_or_object.get("level", level)
         group = str(name_or_object.get("group", group)).strip() or group
         options = name_or_object.get("options", options)
+        slash_enabled = normalize_slash_enabled(
+            name_or_object.get("slash_enabled", name_or_object.get("slash", slash_enabled))
+        )
     else:
         names = (str(name_or_object).strip(), *(str(item).strip() for item in aliases if str(item).strip()))
 
+    normalized_level = normalize_command_level(level)
     names = tuple(dict.fromkeys(normalize_command_name(name) for name in names if normalize_command_name(name)))
     if not names:
         raise ValueError("command spec needs at least one name")
@@ -88,9 +94,10 @@ def command_spec(
     return CommandSpec(
         names=names,
         description=description.strip() or "No description.",
-        level=normalize_command_level(level),
+        level=normalized_level,
         group=group,
         options=normalize_command_options(options),
+        slash_enabled=slash_enabled,
     )
 
 
@@ -160,6 +167,19 @@ def normalize_option_type(value: str) -> str:
     return aliases.get(normalized, "string")
 
 
+def normalize_slash_enabled(value: Any) -> bool | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "y", "on", "slash"}:
+        return True
+    if normalized in {"0", "false", "no", "n", "off", "prefix", "prefix-only"}:
+        return False
+    return None
+
+
 def normalize_command_level(value: str | CommandLevel) -> CommandLevel:
     if isinstance(value, CommandLevel):
         return value
@@ -198,7 +218,8 @@ def register_dual_command(
 ) -> commands.Command:
     prefix_command = build_prefix_command(bot, spec, handler, plugin_name)
     bot.add_command(prefix_command)
-    add_slash_command(bot, spec, handler, plugin_name)
+    if should_register_slash_command(spec):
+        add_slash_command(bot, spec, handler, plugin_name)
     return prefix_command
 
 
@@ -230,6 +251,8 @@ def add_slash_command(
     handler: CommandHandler,
     plugin_name: str | None = None,
 ) -> list[app_commands.Command]:
+    if not should_register_slash_command(spec):
+        return []
     slash_commands = []
     for slash_name in spec.names:
         async def callback(interaction: discord.Interaction, **kwargs: Any) -> None:
@@ -252,6 +275,12 @@ def add_slash_command(
         bot.tree.add_command(slash_command)
         slash_commands.append(slash_command)
     return slash_commands
+
+
+def should_register_slash_command(spec: CommandSpec) -> bool:
+    if spec.level is not CommandLevel.USER:
+        return False
+    return spec.slash_enabled is not False
 
 
 def configure_slash_callback(callback: Callable[..., Awaitable[None]], spec: CommandSpec) -> None:

@@ -35,6 +35,8 @@ def test_trusted_plugin_generation_instructions_allow_bus_integrations():
     assert 'api.shared["plugin_id.api"]' in instructions
     assert '@api.on("topic")' in instructions
     assert "await api.emit" in instructions
+    assert '"slash": false' in instructions
+    assert "Admin and kinger commands must stay prefix-only" in instructions
 
 
 def test_plugin_update_instructions_keep_hierarchy_contract():
@@ -45,6 +47,7 @@ def test_plugin_update_instructions_keep_hierarchy_contract():
     assert "S2 admin moderation/config commands" in instructions
     assert "S1 kinger" in instructions
     assert "Python-level API for other plugins" in instructions
+    assert "Slash commands are currently S3/user-only" in instructions
 
 
 def test_command_router_prompt_includes_replied_caine_message_context():
@@ -75,3 +78,6 @@ def test_command_router_prompt_includes_replied_caine_message_context():
     assert route.command_name == "ask"
     assert "Replied-to CAINE message: CAINE: Nutze `!help level_manege` fuer Details." in responses.input
     assert "replied-to message as context" in responses.instructions
+    assert "already filtered by the user's" in responses.instructions
+    assert "including admin or kinger commands" in responses.instructions
+    assert "Never route destructive commands" not in responses.instructions

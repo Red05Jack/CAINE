@@ -10,6 +10,7 @@ from caine.command_system import (
     has_command_access,
     load_command_permission_config,
     register_dual_command,
+    should_register_slash_command,
     sync_application_commands,
     slash_sync_guild_ids,
 )
@@ -74,6 +75,20 @@ def test_command_object_normalizes_names_and_options():
     assert [option.type for option in spec.options] == ["user", "string"]
 
 
+def test_command_object_parses_slash_enabled_flag():
+    spec = command_spec(
+        {
+            "names": ["quiet"],
+            "description": "Prefix only.",
+            "level": "user",
+            "slash": False,
+        }
+    )
+
+    assert spec.slash_enabled is False
+    assert not should_register_slash_command(spec)
+
+
 def test_command_object_registers_prefix_alias_and_slash_alias():
     bot = commands.Bot(command_prefix="!", intents=discord.Intents.default(), help_command=None)
     spec = command_spec({"names": ["help", "hilfe"], "description": "Shows help.", "level": "user"})
@@ -87,6 +102,38 @@ def test_command_object_registers_prefix_alias_and_slash_alias():
     assert bot.get_command("hilfe") is not None
     assert bot.tree.get_command("help") is not None
     assert bot.tree.get_command("hilfe") is not None
+
+
+def test_admin_and_kinger_commands_are_prefix_only_by_default():
+    bot = commands.Bot(command_prefix="!", intents=discord.Intents.default(), help_command=None)
+    admin_spec = command_spec({"names": ["approve"], "description": "Approve.", "level": "admin"})
+    kinger_spec = command_spec({"names": ["health"], "description": "Health.", "level": "kinger"})
+
+    async def handler(ctx, args):
+        pass
+
+    register_dual_command(bot, admin_spec, handler)
+    register_dual_command(bot, kinger_spec, handler)
+
+    assert bot.get_command("approve") is not None
+    assert bot.get_command("health") is not None
+    assert bot.tree.get_command("approve") is None
+    assert bot.tree.get_command("health") is None
+    assert not should_register_slash_command(admin_spec)
+    assert not should_register_slash_command(kinger_spec)
+
+
+def test_user_command_can_disable_slash_generation():
+    bot = commands.Bot(command_prefix="!", intents=discord.Intents.default(), help_command=None)
+    spec = command_spec({"names": ["quiet"], "description": "Quiet.", "level": "user", "slash": False})
+
+    async def handler(ctx, args):
+        pass
+
+    register_dual_command(bot, spec, handler)
+
+    assert bot.get_command("quiet") is not None
+    assert bot.tree.get_command("quiet") is None
 
 
 def test_slash_command_uses_declared_option_types_and_no_default_text_option():

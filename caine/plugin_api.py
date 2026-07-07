@@ -50,6 +50,7 @@ class PluginAPI:
         aliases: tuple[str, ...] | list[str] = (),
         level: str = "user",
         options: tuple[Any, ...] | list[Any] = (),
+        slash: bool | None = None,
     ) -> Callable[[PluginHandler], PluginHandler]:
         def decorator(handler: PluginHandler) -> PluginHandler:
             spec = command_spec(
@@ -58,6 +59,7 @@ class PluginAPI:
                 aliases=aliases,
                 level=level,
                 options=options,
+                slash_enabled=slash,
             )
 
             async def callback(ctx: commands.Context, args: str = "") -> None:

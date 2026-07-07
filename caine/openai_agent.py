@@ -545,15 +545,20 @@ class OpenAIAgent:
               by a more specific command.
             - When the user replied to an earlier CAINE message, use that
               replied-to message as context for the current request.
+            - The available command catalog is already filtered by the user's
+              S3/S2/S1 permissions. You may choose any command in that catalog,
+              including admin or kinger commands, when the current message and
+              reply context show enough intent.
             - For vague follow-ups like "was meinst du", "mach das", or
-              "erklaer das" in a reply, prefer "ask" and include enough of
-              the reply context in args for CAINE to answer coherently.
+              "erklaer das" in a reply, prefer "ask" when there is no concrete
+              command suggestion in the replied-to CAINE message. If the
+              replied-to message clearly suggests a command and the user
+              confirms it, route that command with the suggested args.
             - For plugin-specific questions, choose "help" with the plugin name
               as args when that is the safest answer.
-            - Only choose admin/kinger commands when the user clearly asks for
-              that exact administrative action or names the command.
-            - Never route destructive commands like approve, reject, reset,
-              remove, delete, import, recalculate from vague text.
+            - Do not reject a command only because it is S2/S1 or changes state;
+              if it appears in the catalog, permission is sufficient. Still
+              require a concrete target or arguments from the message/context.
             - args must not include the command prefix or the command name.
             - Keep args short and preserve user IDs, mentions, channel names,
               numbers, and plugin names exactly when useful.
@@ -785,8 +790,13 @@ class OpenAIAgent:
                   "names": ["command_name"],
                   "description": "...",
                   "level": "user",
+                  "slash": true,
                   "options": []
                   }).
+                - Slash commands are generated only for S3/user commands for
+                  now. Admin and kinger commands must stay prefix-only.
+                - Use "slash": false on a user command when it should be
+                  prefix-only.
                 - Add slash options only when the command truly needs input.
                   Option objects are {"name": "...", "description": "...",
                   "type": "string|integer|number|boolean|user|channel|role|attachment",
@@ -834,8 +844,12 @@ class OpenAIAgent:
               "names": ["command_name"],
               "description": "...",
               "level": "user",
+              "slash": true,
               "options": []
               }).
+            - Slash commands are generated only for S3/user commands for now.
+              Admin and kinger commands must stay prefix-only. Use
+              "slash": false on a user command when it should be prefix-only.
             - For non-trivial plugins, register a compact hierarchy of commands:
               one or more "user" commands for normal use, one or more "admin"
               commands for moderation/config/status, and a "kinger" command for
@@ -896,6 +910,9 @@ class OpenAIAgent:
               audit/master commands, and a Python-level API for other plugins.
             - Keep async/sync behavior compatible with the current code.
             - If the plugin uses api.storage_get/set/delete, keep the await pattern.
+            - Slash commands are currently S3/user-only. Keep admin and kinger
+              commands prefix-only; use "slash": false on user commands that
+              should also stay prefix-only.
             - If trusted plugin APIs are useful, you may use api.bot, api.manager,
               api.shared, @api.event(...), @api.on(...), and await api.emit(...).
             - In untrusted mode, prefer api.shared and await api.emit(...) for

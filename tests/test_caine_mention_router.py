@@ -7,8 +7,11 @@ from discord.ext import commands
 from caine.bot import (
     build_command_routing_catalog,
     content_mentions_caine,
+    extract_approve_plugin_id,
+    extract_suggested_command_route,
     install_commands,
     local_caine_command_route,
+    local_caine_reply_route,
     resolve_replied_caine_message_content,
     strip_caine_triggers,
 )
@@ -100,6 +103,71 @@ def test_local_route_preserves_direct_command_arguments():
     assert route is not None
     assert route.command_name == "rank"
     assert route.args == "@Red__Jack"
+
+
+def test_reply_confirmation_routes_to_approve_from_caine_review_message():
+    route = local_caine_reply_route(
+        "passt so",
+        "Plugin-Vorschlag `geburtstags_manege` gespeichert.\nAktivieren mit `!approve geburtstags_manege`.",
+        [{"name": "approve", "aliases": [], "description": "Approve"}],
+        "!",
+    )
+
+    assert route is not None
+    assert route.command_name == "approve"
+    assert route.args == "geburtstags_manege"
+
+
+def test_reply_confirmation_routes_any_visible_suggested_command():
+    route = local_caine_reply_route(
+        "jo machen wir so",
+        "Wenn das weg soll, nutze `!reject geburtstags_manege`.",
+        [{"name": "reject", "aliases": [], "description": "Reject"}],
+        "!",
+    )
+
+    assert route is not None
+    assert route.command_name == "reject"
+    assert route.args == "geburtstags_manege"
+
+
+def test_reply_confirmation_ignores_commands_not_visible_in_catalog():
+    route = local_caine_reply_route(
+        "jo machen wir so",
+        "Wenn das weg soll, nutze `!reject geburtstags_manege`.",
+        [{"name": "help", "aliases": [], "description": "Help"}],
+        "!",
+    )
+
+    assert route is None
+
+
+def test_approve_is_preferred_when_review_message_contains_multiple_commands():
+    route = extract_suggested_command_route(
+        "Command: `!birthday_set`\nAktivieren mit `!approve geburtstags_manege`.",
+        {"birthday_set": "birthday_set", "approve": "approve"},
+        "!",
+    )
+
+    assert route is not None
+    assert route.command_name == "approve"
+    assert route.args == "geburtstags_manege"
+
+
+def test_reply_confirmation_does_not_approve_without_explicit_review_command():
+    route = local_caine_reply_route(
+        "passt so",
+        "Ich finde das Plugin ziemlich gut.",
+        [{"name": "approve", "aliases": [], "description": "Approve"}],
+        "!",
+    )
+
+    assert route is None
+
+
+def test_approve_plugin_id_is_extracted_from_review_message():
+    assert extract_approve_plugin_id("Aktivieren mit `!approve geburtstags_manege`.") == "geburtstags_manege"
+    assert extract_approve_plugin_id("Aktivieren mit `/approve geburtstags_manege`.") == "geburtstags_manege"
 
 
 def test_routing_catalog_only_contains_commands_visible_to_user():
