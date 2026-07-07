@@ -4,8 +4,4 @@
 __pycache__/
 *.pyc
 .pytest_cache/
-plugins/pending/*.py
-plugins/pending/*.json
-plugins/approved/*.py
-!plugins/approved/hello_plugin.py
 data/

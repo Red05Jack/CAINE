@@ -78,8 +78,8 @@ def test_general_help_groups_core_commands_and_summarizes_plugins(tmp_path):
 
     text = run(build_general_help_text(bot, user))
 
-    assert "Normale Commands:" in text
-    assert "General:" in text
+    assert "Commands:" in text
+    assert "General:" not in text
     assert "`!help`: Shows core commands and plugin details." in text
     assert "`!ask`: Asks C.A.I.N.E. via OpenAI." in text
     assert "[S3]" not in text
@@ -100,6 +100,7 @@ def test_plugin_help_shows_exact_plugin_commands(tmp_path):
 
     assert text is not None
     assert "Plugin `hello_plugin`" in text
+    assert "Commands:" in text
     assert "`!hello`: Begruesst dich." in text
     assert "`!adminhello` [S2]" not in text
     assert "`!kinghello` [S1]" not in text
@@ -113,9 +114,13 @@ def test_admin_help_includes_admin_commands_but_not_kinger(tmp_path):
     text = run(build_general_help_text(bot, admin))
     plugin_text = run(build_plugin_help_text(bot, "hello_plugin", admin))
 
+    assert "Commands:" in text
+    assert "Admin commands:" in text
     assert "`!evolve`: Creates a pending plugin from a feature request." in text
     assert "[S2]" not in text
     assert "`!health` [S1]" not in text
+    assert "Commands:" in plugin_text
+    assert "Admin commands:" in plugin_text
     assert "`!adminhello`: Admin hello." in plugin_text
     assert "`!kinghello` [S1]" not in plugin_text
 
@@ -128,9 +133,13 @@ def test_kinger_help_includes_kinger_commands_but_not_admin(tmp_path):
     text = run(build_general_help_text(bot, kinger))
     plugin_text = run(build_plugin_help_text(bot, "hello_plugin", kinger))
 
-    assert "`!help` [S3]" in text
-    assert "`!health` [S1]" in text
+    assert "Commands:" in text
+    assert "Kinger:" in text
+    assert "`!help`: Shows core commands and plugin details." in text
+    assert "`!health`: Checks CAINE runtime state." in text
     assert "`!evolve` [S2]" not in text
-    assert "`!hello` [S3]: Begruesst dich." in plugin_text
-    assert "`!kinghello` [S1]: Kinger hello." in plugin_text
+    assert "Commands:" in plugin_text
+    assert "Kinger:" in plugin_text
+    assert "`!hello`: Begruesst dich." in plugin_text
+    assert "`!kinghello`: Kinger hello." in plugin_text
     assert "`!adminhello` [S2]" not in plugin_text

@@ -117,11 +117,17 @@ CORE_COMMANDS = {
     "health": CommandSpec(("health",), "Checks CAINE runtime state.", CommandLevel.KINGER, "System"),
 }
 
-CORE_HELP_GROUPS = (
-    ("General", ("help", "ask", "plugins")),
-    ("Plugin Lab", ("evolve", "evolve_plugin", "pending", "review", "approve", "reject", "reload_plugins")),
-    ("System", ("health",)),
+COMMAND_LEVEL_HELP_GROUPS = (
+    (CommandLevel.USER, "Commands"),
+    (CommandLevel.ADMIN, "Admin commands"),
+    (CommandLevel.KINGER, "Kinger"),
 )
+
+COMMAND_LEVEL_ORDER = {
+    CommandLevel.USER: 0,
+    CommandLevel.ADMIN: 1,
+    CommandLevel.KINGER: 2,
+}
 
 
 class CaineBot(commands.Bot):
@@ -437,48 +443,23 @@ async def send_long(ctx: commands.Context, content: str) -> None:
 async def build_general_help_text(bot: commands.Bot, user: discord.abc.User | None = None) -> str:
     prefix = bot_command_prefix(bot)
     plugin_command_names = loaded_plugin_command_names(bot)
-    show_level_labels = can_view_level_labels(bot, user)
-    grouped_names: set[str] = set()
     lines = [
         "CAINE Help",
         "",
-        "Normale Commands:",
     ]
 
-    for group_name, command_names in CORE_HELP_GROUPS:
-        group_lines = []
-        for command_name in command_names:
-            command = bot.get_command(command_name)
-            if command is None or command.hidden or command.name in plugin_command_names:
-                continue
-            if not await command_visible_to_user(bot, command, user):
-                continue
-            grouped_names.add(command.name)
-            group_lines.append(format_command_help_line(command, prefix, show_level_labels=show_level_labels))
-        if group_lines:
-            lines.append(f"\n{group_name}:")
-            lines.extend(group_lines)
-
-    extra_commands = sorted(
-        (
-            command
-            for command in bot.commands
-            if command.name not in grouped_names
-            and command.name not in plugin_command_names
-            and not command.hidden
-        ),
-        key=lambda command: command.name,
-    )
-    visible_extra_commands = []
-    for command in extra_commands:
+    visible_commands = []
+    for command in bot.commands:
+        if command.name in plugin_command_names or command.hidden:
+            continue
         if await command_visible_to_user(bot, command, user):
-            visible_extra_commands.append(command)
-    if visible_extra_commands:
-        lines.append("\nWeitere:")
-        lines.extend(
-            format_command_help_line(command, prefix, show_level_labels=show_level_labels)
-            for command in visible_extra_commands
-        )
+            visible_commands.append(command)
+    if visible_commands:
+        visible_commands.sort(key=lambda command: (command_level_sort_key(command), command.name))
+        lines.extend(format_commands_by_level(visible_commands, prefix))
+    else:
+        lines.append("Commands:")
+        lines.append("- Keine fuer dich sichtbaren Commands.")
 
     lines.append("\nPlugins:")
     plugins = sorted(getattr(getattr(bot, "plugins", None), "loaded", {}).values(), key=lambda plugin: plugin.name)
@@ -505,21 +486,17 @@ async def build_plugin_help_text(
         return None
 
     prefix = bot_command_prefix(bot)
-    show_level_labels = can_view_level_labels(bot, user)
     lines = [
         f"Plugin `{plugin.name}`",
         plugin.description or "ohne Beschreibung",
         "",
-        "Commands:",
     ]
     commands_for_plugin = await registered_plugin_commands(bot, plugin, user)
     if not commands_for_plugin:
+        lines.append("Commands:")
         lines.append("- Keine fuer dich sichtbaren Commands.")
     else:
-        lines.extend(
-            format_command_help_line(command, prefix, show_level_labels=show_level_labels)
-            for command in commands_for_plugin
-        )
+        lines.extend(format_commands_by_level(commands_for_plugin, prefix))
 
     return "\n".join(lines)[:3900]
 
@@ -534,7 +511,7 @@ async def registered_plugin_commands(
         command = bot.get_command(command_name)
         if command is not None and not command.hidden and await command_visible_to_user(bot, command, user):
             result.append(command)
-    return sorted(result, key=lambda command: command.name)
+    return sorted(result, key=lambda command: (command_level_sort_key(command), command.name))
 
 
 async def command_visible_to_user(
@@ -605,10 +582,43 @@ def format_command_help_line(
     return f"- `{prefix}{command.name}`{level}{alias_text}: {description}"
 
 
+def format_commands_by_level(
+    command_list: list[commands.Command],
+    prefix: str,
+) -> list[str]:
+    lines: list[str] = []
+    for level, heading in COMMAND_LEVEL_HELP_GROUPS:
+        group_commands = [command for command in command_list if command_level(command) == level]
+        if not group_commands:
+            continue
+        if lines:
+            lines.append("")
+        lines.append(f"{heading}:")
+        lines.extend(
+            format_command_help_line(command, prefix, show_level_labels=False)
+            for command in group_commands
+        )
+    return lines
+
+
+def command_level(command: commands.Command) -> CommandLevel:
+    spec = getattr(command, "caine_spec", None)
+    level = getattr(spec, "level", CommandLevel.USER)
+    if level == CommandLevel.KINGER or str(level).lower() == CommandLevel.KINGER.value:
+        return CommandLevel.KINGER
+    if level == CommandLevel.ADMIN or str(level).lower() == CommandLevel.ADMIN.value:
+        return CommandLevel.ADMIN
+    return CommandLevel.USER
+
+
+def command_level_sort_key(command: commands.Command) -> int:
+    return COMMAND_LEVEL_ORDER.get(command_level(command), COMMAND_LEVEL_ORDER[CommandLevel.USER])
+
+
 def command_level_label(level: object) -> str:
-    if level is CommandLevel.KINGER:
+    if level == CommandLevel.KINGER or str(level).lower() == CommandLevel.KINGER.value:
         return "[S1]"
-    if level is CommandLevel.ADMIN:
+    if level == CommandLevel.ADMIN or str(level).lower() == CommandLevel.ADMIN.value:
         return "[S2]"
     return "[S3]"
 
