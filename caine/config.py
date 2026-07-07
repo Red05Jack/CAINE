@@ -48,7 +48,8 @@ def _secret(value: str | None) -> str:
 class Settings:
     discord_token: str
     openai_api_key: str
-    openai_model: str
+    openai_text_model: str
+    openai_code_model: str
     command_prefix: str
     allowed_guild_ids: set[int]
     plugin_autoload: bool
@@ -63,6 +64,10 @@ class Settings:
     def openai_enabled(self) -> bool:
         return bool(self.openai_api_key)
 
+    @property
+    def openai_model(self) -> str:
+        return self.openai_code_model
+
 
 def load_settings() -> Settings:
     root = Path(__file__).resolve().parent.parent
@@ -75,7 +80,8 @@ def load_settings() -> Settings:
     return Settings(
         discord_token=_secret(os.getenv("DISCORD_TOKEN")),
         openai_api_key=_secret(os.getenv("OPENAI_API_KEY")),
-        openai_model=os.getenv("OPENAI_MODEL", "gpt-5.5"),
+        openai_text_model=os.getenv("OPENAI_TEXT_MODEL", os.getenv("OPENAI_CHEAP_MODEL", "gpt-5-nano")),
+        openai_code_model=os.getenv("OPENAI_CODE_MODEL", os.getenv("OPENAI_MODEL", "gpt-5.5")),
         command_prefix=os.getenv("COMMAND_PREFIX", "!"),
         allowed_guild_ids=_csv_int(os.getenv("CAINE_ALLOWED_GUILD_IDS")),
         plugin_autoload=_bool(os.getenv("CAINE_PLUGIN_AUTOLOAD"), True),

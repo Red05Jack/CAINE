@@ -7,14 +7,12 @@ from discord.ext import commands
 from caine.bot import (
     build_command_routing_catalog,
     content_mentions_caine,
-    extract_approve_plugin_id,
-    extract_suggested_command_route,
     install_commands,
-    local_caine_command_route,
-    local_caine_reply_route,
     resolve_replied_caine_message_content,
+    route_caine_mention_to_command,
     strip_caine_triggers,
 )
+from caine.openai_agent import CommandRoute
 
 
 class FakeMember:
@@ -22,6 +20,44 @@ class FakeMember:
 
     def __init__(self, administrator=False):
         self.guild_permissions = SimpleNamespace(administrator=administrator)
+        self.display_name = "Jakob"
+        self.name = "Jakob"
+        self.bot = False
+
+
+class FakeAgent:
+    def __init__(self, route):
+        self.route = route
+        self.calls = []
+
+    async def select_command_for_message(
+        self,
+        message_text,
+        cleaned_request,
+        author_name,
+        command_catalog,
+        prefix,
+        replied_to_message_text="",
+    ):
+        self.calls.append(
+            {
+                "message_text": message_text,
+                "cleaned_request": cleaned_request,
+                "author_name": author_name,
+                "command_catalog": command_catalog,
+                "prefix": prefix,
+                "replied_to_message_text": replied_to_message_text,
+            }
+        )
+        return self.route
+
+
+class FakeContext:
+    def __init__(self, invoked):
+        self.invoked = invoked
+
+    async def invoke(self, command, *, args=""):
+        self.invoked.append((command.name, args))
 
 
 def run(coro):
@@ -39,6 +75,13 @@ def make_bot():
     bot.plugins = SimpleNamespace(loaded={})
     install_commands(bot)
     return bot
+
+
+def route_bot_context_to(invoked):
+    async def get_context(message):
+        return FakeContext(invoked)
+
+    return get_context
 
 
 def test_caine_trigger_spellings_are_detected_without_substring_noise():
@@ -83,91 +126,49 @@ def test_replied_caine_message_can_be_fetched_when_not_resolved():
     assert run(resolve_replied_caine_message_content(bot, message)) == "Alte CAINE-Antwort"
 
 
-def test_local_route_maps_help_question_to_help_command():
-    route = local_caine_command_route(
-        "hey was kann ich machen",
-        [{"name": "help", "aliases": [], "description": "Help"}],
+def test_caine_mention_is_always_sent_to_api_router():
+    bot = make_bot()
+    bot.agent = FakeAgent(CommandRoute(command_name="ask", args="was geht", confidence=0.9))
+    invoked = []
+    bot.get_context = route_bot_context_to(invoked)
+    message = SimpleNamespace(
+        content="caine was geht?",
+        author=FakeMember(),
+        channel=SimpleNamespace(),
+        reference=None,
     )
 
-    assert route is not None
-    assert route.command_name == "help"
-    assert route.args == ""
+    assert run(route_caine_mention_to_command(bot, message)) is True
+
+    assert invoked == [("ask", "was geht")]
+    assert len(bot.agent.calls) == 1
+    assert bot.agent.calls[0]["message_text"] == "caine was geht?"
+    assert bot.agent.calls[0]["cleaned_request"] == "was geht"
 
 
-def test_local_route_preserves_direct_command_arguments():
-    route = local_caine_command_route(
-        "hey rank @Red__Jack",
-        [{"name": "rank", "aliases": ["myrank"], "description": "Rank"}],
+def test_reply_to_caine_message_is_sent_to_api_router_with_context():
+    bot = make_bot()
+    bot._connection.user = SimpleNamespace(id=42)
+    bot.agent = FakeAgent(CommandRoute(command_name="help", args="geburtstags_manege", confidence=0.9))
+    invoked = []
+    bot.get_context = route_bot_context_to(invoked)
+    replied_message = SimpleNamespace(
+        author=SimpleNamespace(id=42),
+        content="Plugin-Vorschlag `geburtstags_manege` gespeichert. Aktivieren mit `!approve geburtstags_manege`.",
+    )
+    message = SimpleNamespace(
+        content="passt so",
+        author=FakeMember(),
+        channel=SimpleNamespace(),
+        reference=SimpleNamespace(resolved=replied_message),
     )
 
-    assert route is not None
-    assert route.command_name == "rank"
-    assert route.args == "@Red__Jack"
+    assert run(route_caine_mention_to_command(bot, message)) is True
 
-
-def test_reply_confirmation_routes_to_approve_from_caine_review_message():
-    route = local_caine_reply_route(
-        "passt so",
-        "Plugin-Vorschlag `geburtstags_manege` gespeichert.\nAktivieren mit `!approve geburtstags_manege`.",
-        [{"name": "approve", "aliases": [], "description": "Approve"}],
-        "!",
-    )
-
-    assert route is not None
-    assert route.command_name == "approve"
-    assert route.args == "geburtstags_manege"
-
-
-def test_reply_confirmation_routes_any_visible_suggested_command():
-    route = local_caine_reply_route(
-        "jo machen wir so",
-        "Wenn das weg soll, nutze `!reject geburtstags_manege`.",
-        [{"name": "reject", "aliases": [], "description": "Reject"}],
-        "!",
-    )
-
-    assert route is not None
-    assert route.command_name == "reject"
-    assert route.args == "geburtstags_manege"
-
-
-def test_reply_confirmation_ignores_commands_not_visible_in_catalog():
-    route = local_caine_reply_route(
-        "jo machen wir so",
-        "Wenn das weg soll, nutze `!reject geburtstags_manege`.",
-        [{"name": "help", "aliases": [], "description": "Help"}],
-        "!",
-    )
-
-    assert route is None
-
-
-def test_approve_is_preferred_when_review_message_contains_multiple_commands():
-    route = extract_suggested_command_route(
-        "Command: `!birthday_set`\nAktivieren mit `!approve geburtstags_manege`.",
-        {"birthday_set": "birthday_set", "approve": "approve"},
-        "!",
-    )
-
-    assert route is not None
-    assert route.command_name == "approve"
-    assert route.args == "geburtstags_manege"
-
-
-def test_reply_confirmation_does_not_approve_without_explicit_review_command():
-    route = local_caine_reply_route(
-        "passt so",
-        "Ich finde das Plugin ziemlich gut.",
-        [{"name": "approve", "aliases": [], "description": "Approve"}],
-        "!",
-    )
-
-    assert route is None
-
-
-def test_approve_plugin_id_is_extracted_from_review_message():
-    assert extract_approve_plugin_id("Aktivieren mit `!approve geburtstags_manege`.") == "geburtstags_manege"
-    assert extract_approve_plugin_id("Aktivieren mit `/approve geburtstags_manege`.") == "geburtstags_manege"
+    assert invoked == [("help", "geburtstags_manege")]
+    assert len(bot.agent.calls) == 1
+    assert bot.agent.calls[0]["cleaned_request"] == "passt so"
+    assert bot.agent.calls[0]["replied_to_message_text"] == replied_message.content
 
 
 def test_routing_catalog_only_contains_commands_visible_to_user():

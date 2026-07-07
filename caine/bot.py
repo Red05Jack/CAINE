@@ -63,46 +63,6 @@ CAINE_TRIGGER_SPELLINGS = (
     "caine bot",
     "caine-bot",
 )
-CAINE_ROUTE_FILLER_WORDS = {
-    "hey",
-    "hi",
-    "hallo",
-    "servus",
-    "bitte",
-    "mal",
-    "kurz",
-}
-CAINE_HELP_HINTS = (
-    "was kann ich machen",
-    "was kann ich tun",
-    "was kannst du",
-    "was geht",
-    "hilfe",
-    "help",
-    "commands",
-    "befehle",
-    "commandliste",
-)
-CAINE_REPLY_APPROVAL_CONFIRMATIONS = {
-    "approve",
-    "aktivieren",
-    "freigeben",
-    "genehmigen",
-    "ja",
-    "ja bitte",
-    "jo",
-    "jo machen wir so",
-    "mach",
-    "mach das",
-    "machen",
-    "machen wir so",
-    "ok",
-    "okay",
-    "passt",
-    "passt so",
-    "so machen",
-    "yes",
-}
 
 
 class AttachmentInputError(ValueError):
@@ -206,9 +166,10 @@ class CaineBot(commands.Bot):
         self.agent = (
             OpenAIAgent(
                 settings.openai_api_key,
-                settings.openai_model,
+                settings.openai_text_model,
                 settings.trusted_plugins,
                 chatgpt_activity_log_path(settings.data_dir),
+                code_model=settings.openai_code_model,
             )
             if settings.openai_enabled
             else None
@@ -509,7 +470,8 @@ def install_commands(bot: CaineBot) -> None:
             "CAINE Health:",
             f"- Discord Token: {env_status}",
             f"- OpenAI Key: {openai_status}",
-            f"- OpenAI Model: `{bot.settings.openai_model}`",
+            f"- OpenAI Text Model: `{bot.settings.openai_text_model}`",
+            f"- OpenAI Code Model: `{bot.settings.openai_code_model}`",
             f"- Geladene Plugins: {plugin_count}",
             f"- Trusted Plugins: `{bot.settings.trusted_plugins}`",
         ]
@@ -655,26 +617,13 @@ async def route_caine_mention_to_command(bot: commands.Bot, message: discord.Mes
         return False
 
     cleaned_request = strip_caine_triggers(content, getattr(bot, "user", None))
-    route = local_caine_command_route(cleaned_request, command_catalog)
-    if route is None and replied_caine_message:
-        route = local_caine_reply_route(cleaned_request, replied_caine_message, command_catalog, bot_command_prefix(bot))
-    if route is None:
-        agent = getattr(bot, "agent", None)
-        if agent is None:
-            return False
-        try:
-            typing = getattr(getattr(message, "channel", None), "typing", None)
-            if callable(typing):
-                async with typing():
-                    route = await agent.select_command_for_message(
-                        content,
-                        cleaned_request,
-                        str(getattr(message.author, "display_name", getattr(message.author, "name", "User"))),
-                        command_catalog,
-                        bot_command_prefix(bot),
-                        replied_caine_message,
-                    )
-            else:
+    agent = getattr(bot, "agent", None)
+    if agent is None:
+        return False
+    try:
+        typing = getattr(getattr(message, "channel", None), "typing", None)
+        if callable(typing):
+            async with typing():
                 route = await agent.select_command_for_message(
                     content,
                     cleaned_request,
@@ -683,12 +632,21 @@ async def route_caine_mention_to_command(bot: commands.Bot, message: discord.Mes
                     bot_command_prefix(bot),
                     replied_caine_message,
                 )
-        except OpenAIError as exc:
-            log.warning("could not route CAINE mention through OpenAI: %s", exc)
-            return False
-        except Exception as exc:
-            log.warning("could not route CAINE mention: %s", exc)
-            return False
+        else:
+            route = await agent.select_command_for_message(
+                content,
+                cleaned_request,
+                str(getattr(message.author, "display_name", getattr(message.author, "name", "User"))),
+                command_catalog,
+                bot_command_prefix(bot),
+                replied_caine_message,
+            )
+    except OpenAIError as exc:
+        log.warning("could not route CAINE mention through OpenAI: %s", exc)
+        return False
+    except Exception as exc:
+        log.warning("could not route CAINE mention: %s", exc)
+        return False
 
     if route is None or not route.command_name or route.confidence < 0.35:
         return False
@@ -778,127 +736,6 @@ def strip_caine_triggers(content: str, bot_user: discord.abc.User | None = None)
         cleaned = _caine_spelling_pattern(spelling).sub(" ", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned).strip(" ,:;.!?")
     return cleaned.strip()
-
-
-def local_caine_command_route(
-    cleaned_request: str,
-    command_catalog: list[dict[str, object]],
-) -> CommandRoute | None:
-    alias_to_name = command_alias_map(command_catalog)
-
-    raw_tokens = cleaned_request.split()
-    token_index = 0
-    while token_index < len(raw_tokens):
-        normalized_token = raw_tokens[token_index].strip(" ,:;.!?").lower()
-        if normalized_token not in CAINE_ROUTE_FILLER_WORDS:
-            break
-        token_index += 1
-    if token_index < len(raw_tokens):
-        command_name = alias_to_name.get(raw_tokens[token_index].strip(" ,:;.!?").lower())
-        if command_name:
-            return CommandRoute(
-                command_name=command_name,
-                args=" ".join(raw_tokens[token_index + 1:]).strip(),
-                confidence=1.0,
-                reason="direct command",
-            )
-
-    normalized = cleaned_request.casefold()
-    if any(hint in normalized for hint in CAINE_HELP_HINTS) and "help" in alias_to_name:
-        return CommandRoute(command_name="help", args="", confidence=0.95, reason="help question")
-    return None
-
-
-def local_caine_reply_route(
-    cleaned_request: str,
-    replied_caine_message: str,
-    command_catalog: list[dict[str, object]],
-    prefix: str = "!",
-) -> CommandRoute | None:
-    alias_to_name = command_alias_map(command_catalog)
-    if not is_caine_reply_approval(cleaned_request):
-        return None
-    route = extract_suggested_command_route(replied_caine_message, alias_to_name, prefix)
-    if route is None:
-        return None
-    return route
-
-
-def command_alias_map(command_catalog: list[dict[str, object]]) -> dict[str, str]:
-    alias_to_name: dict[str, str] = {}
-    for command in command_catalog:
-        name = str(command.get("name", "")).lower()
-        if not name:
-            continue
-        alias_to_name[name] = name
-        aliases = command.get("aliases", [])
-        if isinstance(aliases, list):
-            for alias in aliases:
-                alias_to_name[str(alias).lower()] = name
-    return alias_to_name
-
-
-def is_caine_reply_approval(cleaned_request: str) -> bool:
-    normalized = re.sub(r"\s+", " ", str(cleaned_request or "").casefold()).strip(" ,:;.!?")
-    if normalized in CAINE_REPLY_APPROVAL_CONFIRMATIONS:
-        return True
-    return normalized.startswith(("ja ", "ok ", "okay ", "jo ")) and any(
-        word in normalized for word in ("passt", "mach", "aktivier", "freigeb", "approve")
-    )
-
-
-def extract_suggested_command_route(
-    replied_caine_message: str,
-    alias_to_name: dict[str, str],
-    prefix: str = "!",
-) -> CommandRoute | None:
-    suggestions = list(iter_suggested_command_routes(replied_caine_message, alias_to_name, prefix))
-    if not suggestions:
-        return None
-
-    for route in reversed(suggestions):
-        if route.command_name == "approve":
-            return route
-    return suggestions[-1]
-
-
-def iter_suggested_command_routes(
-    replied_caine_message: str,
-    alias_to_name: dict[str, str],
-    prefix: str = "!",
-):
-    prefixes = {str(prefix or "!"), "!", "/"}
-    escaped_prefixes = "|".join(re.escape(item) for item in sorted(prefixes, key=len, reverse=True))
-    pattern = re.compile(
-        rf"(?<![A-Za-z0-9_/-])(?:{escaped_prefixes})([A-Za-z][A-Za-z0-9_-]{{0,31}})(?:\s+([^\n`]*))?",
-        re.IGNORECASE,
-    )
-    for match in pattern.finditer(str(replied_caine_message or "")):
-        command_name = alias_to_name.get(match.group(1).casefold())
-        if not command_name:
-            continue
-        args = clean_suggested_command_args(match.group(2) or "")
-        yield CommandRoute(
-            command_name=command_name,
-            args=args,
-            confidence=1.0,
-            reason="confirmation reply to suggested command",
-        )
-
-
-def clean_suggested_command_args(args: str) -> str:
-    cleaned = str(args or "").strip()
-    cleaned = re.split(r"\s+(?:und|oder|mit|via)\s+[`']?[!/][A-Za-z]", cleaned, maxsplit=1)[0].strip()
-    for _ in range(2):
-        cleaned = cleaned.strip(" `'\t\r\n")
-        cleaned = cleaned.rstrip(".,;:!)?]}")
-        cleaned = cleaned.lstrip("([{'")
-    return cleaned.strip()
-
-
-def extract_approve_plugin_id(replied_caine_message: str, prefix: str = "!") -> str:
-    route = extract_suggested_command_route(str(replied_caine_message or ""), {"approve": "approve"}, prefix)
-    return route.args if route and route.command_name == "approve" else ""
 
 
 def _contains_caine_spelling(content: str, spelling: str) -> bool:

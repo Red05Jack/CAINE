@@ -435,11 +435,14 @@ class OpenAIAgent:
     def __init__(
         self,
         api_key: str,
-        model: str,
+        text_model: str,
         trusted_plugins: bool = False,
         activity_log_path: str | Path | None = None,
+        code_model: str | None = None,
     ) -> None:
-        self.model = model
+        self.text_model = text_model
+        self.code_model = code_model or text_model
+        self.model = self.code_model
         self.trusted_plugins = trusted_plugins
         self.client = OpenAI(api_key=api_key)
         self.activity_logger = ChatGPTActivityLogger(activity_log_path)
@@ -488,6 +491,7 @@ class OpenAIAgent:
         )
 
     def _answer_sync(self, prompt: str, author_name: str) -> str:
+        model = self._text_model_name()
         instructions = _instruction_block(
             CAINE_INSPIRED_PLUGIN_BOT_INSTRUCTIONS,
             """
@@ -505,18 +509,31 @@ class OpenAIAgent:
             author_name=author_name,
             input=_text_log_summary(user_input),
             instructions=_text_log_summary(instructions),
+            model=model,
         )
         try:
             response = self.client.responses.create(
-                model=self.model,
+                model=model,
                 instructions=instructions,
                 input=user_input,
             )
         except Exception as exc:
-            self._log_activity("chatgpt.answer", "error", author_name=author_name, error=_error_log_payload(exc))
+            self._log_activity(
+                "chatgpt.answer",
+                "error",
+                author_name=author_name,
+                error=_error_log_payload(exc),
+                model=model,
+            )
             raise
         text = getattr(response, "output_text", "").strip() or "Ich habe keine Antwort erhalten."
-        self._log_activity("chatgpt.answer", "response", author_name=author_name, output=_text_log_summary(text))
+        self._log_activity(
+            "chatgpt.answer",
+            "response",
+            author_name=author_name,
+            output=_text_log_summary(text),
+            model=model,
+        )
         return text
 
     def _select_command_for_message_sync(
@@ -528,6 +545,7 @@ class OpenAIAgent:
         prefix: str,
         replied_to_message_text: str = "",
     ) -> CommandRoute:
+        model = self._text_model_name()
         command_catalog = command_catalog[:80]
         instructions = _instruction_block(
             CAINE_INSPIRED_PLUGIN_BOT_INSTRUCTIONS,
@@ -589,13 +607,14 @@ class OpenAIAgent:
             replied_to_message=_text_log_summary(replied_to_message_text),
             command_count=len(command_catalog),
             commands=[item.get("name") for item in command_catalog],
+            model=model,
         )
 
         parse = getattr(self.client.responses, "parse", None)
         if parse is not None:
             try:
                 response = parse(
-                    model=self.model,
+                    model=model,
                     instructions=instructions,
                     input=user_input,
                     text_format=CommandRoute,
@@ -608,17 +627,24 @@ class OpenAIAgent:
                         "response",
                         method="parse",
                         route=clean_route.model_dump(),
+                        model=model,
                     )
                     return clean_route
             except TypeError:
                 pass
             except Exception as exc:
-                self._log_activity("chatgpt.command_router", "error", method="parse", error=_error_log_payload(exc))
+                self._log_activity(
+                    "chatgpt.command_router",
+                    "error",
+                    method="parse",
+                    error=_error_log_payload(exc),
+                    model=model,
+                )
                 raise
 
         try:
             response = self.client.responses.create(
-                model=self.model,
+                model=model,
                 instructions=(
                     instructions
                     + "\nReturn valid JSON with keys command_name, args, confidence, reason."
@@ -628,12 +654,25 @@ class OpenAIAgent:
             payload = json.loads(getattr(response, "output_text", "{}"))
             clean_route = _clean_command_route(CommandRoute.model_validate(payload), command_catalog)
         except Exception as exc:
-            self._log_activity("chatgpt.command_router", "error", method="json", error=_error_log_payload(exc))
+            self._log_activity(
+                "chatgpt.command_router",
+                "error",
+                method="json",
+                error=_error_log_payload(exc),
+                model=model,
+            )
             raise
-        self._log_activity("chatgpt.command_router", "response", method="json", route=clean_route.model_dump())
+        self._log_activity(
+            "chatgpt.command_router",
+            "response",
+            method="json",
+            route=clean_route.model_dump(),
+            model=model,
+        )
         return clean_route
 
     def _create_plugin_sync(self, request: str, author_name: str) -> PluginDraft:
+        model = self._code_model_name()
         instructions = self._plugin_generation_instructions()
 
         user_input = dedent(
@@ -648,13 +687,14 @@ class OpenAIAgent:
             author_name=author_name,
             feature_request=_text_log_summary(request),
             trusted_plugins=self.trusted_plugins,
+            model=model,
         )
 
         parse = getattr(self.client.responses, "parse", None)
         if parse is not None:
             try:
                 response = parse(
-                    model=self.model,
+                    model=model,
                     instructions=instructions,
                     input=user_input,
                     text_format=PluginDraft,
@@ -667,17 +707,24 @@ class OpenAIAgent:
                         "response",
                         method="parse",
                         draft=_plugin_draft_log_payload(draft),
+                        model=model,
                     )
                     return draft
             except TypeError:
                 pass
             except Exception as exc:
-                self._log_activity("chatgpt.create_plugin", "error", method="parse", error=_error_log_payload(exc))
+                self._log_activity(
+                    "chatgpt.create_plugin",
+                    "error",
+                    method="parse",
+                    error=_error_log_payload(exc),
+                    model=model,
+                )
                 raise
 
         try:
             response = self.client.responses.create(
-                model=self.model,
+                model=model,
                 instructions=(
                     instructions
                     + "\nReturn valid JSON with keys name, description, command_name, code, safety_notes."
@@ -688,9 +735,21 @@ class OpenAIAgent:
             draft = PluginDraft.model_validate(payload)
             draft.code = _clean_code_block(draft.code)
         except Exception as exc:
-            self._log_activity("chatgpt.create_plugin", "error", method="json", error=_error_log_payload(exc))
+            self._log_activity(
+                "chatgpt.create_plugin",
+                "error",
+                method="json",
+                error=_error_log_payload(exc),
+                model=model,
+            )
             raise
-        self._log_activity("chatgpt.create_plugin", "response", method="json", draft=_plugin_draft_log_payload(draft))
+        self._log_activity(
+            "chatgpt.create_plugin",
+            "response",
+            method="json",
+            draft=_plugin_draft_log_payload(draft),
+            model=model,
+        )
         return draft
 
     def _update_plugin_sync(
@@ -700,6 +759,7 @@ class OpenAIAgent:
         request: str,
         author_name: str,
     ) -> PluginUpdateDraft:
+        model = self._code_model_name()
         instructions = self._plugin_update_instructions()
 
         user_input = dedent(
@@ -723,13 +783,14 @@ class OpenAIAgent:
             change_request=_text_log_summary(request),
             current_source=_text_log_summary(current_source),
             trusted_plugins=self.trusted_plugins,
+            model=model,
         )
 
         parse = getattr(self.client.responses, "parse", None)
         if parse is not None:
             try:
                 response = parse(
-                    model=self.model,
+                    model=model,
                     instructions=instructions,
                     input=user_input,
                     text_format=PluginUpdateDraft,
@@ -742,17 +803,24 @@ class OpenAIAgent:
                         "response",
                         method="parse",
                         draft=_plugin_update_draft_log_payload(draft),
+                        model=model,
                     )
                     return draft
             except TypeError:
                 pass
             except Exception as exc:
-                self._log_activity("chatgpt.update_plugin", "error", method="parse", error=_error_log_payload(exc))
+                self._log_activity(
+                    "chatgpt.update_plugin",
+                    "error",
+                    method="parse",
+                    error=_error_log_payload(exc),
+                    model=model,
+                )
                 raise
 
         try:
             response = self.client.responses.create(
-                model=self.model,
+                model=model,
                 instructions=(
                     instructions
                     + "\nReturn valid JSON with keys name, description, code, change_summary, safety_notes."
@@ -763,13 +831,20 @@ class OpenAIAgent:
             draft = PluginUpdateDraft.model_validate(payload)
             draft.code = _clean_code_block(draft.code)
         except Exception as exc:
-            self._log_activity("chatgpt.update_plugin", "error", method="json", error=_error_log_payload(exc))
+            self._log_activity(
+                "chatgpt.update_plugin",
+                "error",
+                method="json",
+                error=_error_log_payload(exc),
+                model=model,
+            )
             raise
         self._log_activity(
             "chatgpt.update_plugin",
             "response",
             method="json",
             draft=_plugin_update_draft_log_payload(draft),
+            model=model,
         )
         return draft
 
@@ -931,30 +1006,38 @@ class OpenAIAgent:
         )
 
     def _health_check_sync(self) -> str:
-        self._log_activity("chatgpt.health_check", "request")
+        model = self._text_model_name()
+        self._log_activity("chatgpt.health_check", "request", model=model)
         try:
             response = self.client.responses.create(
-                model=self.model,
+                model=model,
                 instructions="Reply with exactly OK.",
                 input="Health check",
             )
         except OpenAIError as exc:
-            self._log_activity("chatgpt.health_check", "error", error=_error_log_payload(exc))
+            self._log_activity("chatgpt.health_check", "error", error=_error_log_payload(exc), model=model)
             return f"OpenAI Fehler: {exc.__class__.__name__}: {str(exc)[:500]}"
         text = getattr(response, "output_text", "").strip()
         result = text or "OpenAI erreichbar, aber ohne Textantwort."
-        self._log_activity("chatgpt.health_check", "response", output=_text_log_summary(result))
+        self._log_activity("chatgpt.health_check", "response", output=_text_log_summary(result), model=model)
         return result
+
+    def _text_model_name(self) -> str:
+        return getattr(self, "text_model", getattr(self, "model", ""))
+
+    def _code_model_name(self) -> str:
+        return getattr(self, "code_model", getattr(self, "model", self._text_model_name()))
 
     def _log_activity(self, event: str, status: str, **payload: Any) -> None:
         logger = getattr(self, "activity_logger", None)
         if not isinstance(logger, ChatGPTActivityLogger):
             return
+        model = payload.pop("model", None) or self._text_model_name()
         logger.write(
             event,
             status,
             {
-                "model": getattr(self, "model", ""),
+                "model": model,
                 **payload,
             },
         )
