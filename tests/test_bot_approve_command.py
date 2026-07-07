@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import discord
 from discord.ext import commands
 
-from caine.bot import install_commands
+from caine.bot import approved_plugin_source_for_reference, install_commands, pending_activation_hint
 from caine.plugin_manager import PluginManager
 
 
@@ -96,3 +96,41 @@ def test_approve_command_reports_missing_pending_when_plugin_is_unknown(tmp_path
     run(command.callback(ctx, args="missing_plugin"))
 
     assert ctx.replies == ["`missing_plugin` existiert nicht in pending."]
+
+
+def test_approve_command_reports_validation_failure_without_raising(tmp_path):
+    bot = make_bot(tmp_path)
+    bot.plugins.ensure_dirs()
+    pending_path = bot.plugins.pending_dir / "broken_plugin.py"
+    pending_path.write_text("def broken(:\n", encoding="utf-8")
+    ctx = FakeCtx(bot)
+    command = bot.get_command("approve")
+
+    run(command.callback(ctx, args="broken_plugin"))
+
+    assert len(ctx.replies) == 1
+    assert "Plugin-Validation fehlgeschlagen" in ctx.replies[0]
+    assert "Kein Approve ausgefuehrt" in ctx.replies[0]
+    assert "!review broken_plugin" in ctx.replies[0]
+    assert pending_path.exists()
+
+
+def test_invalid_pending_activation_hint_does_not_suggest_approve():
+    hint = pending_activation_hint("!", "broken_plugin", SimpleNamespace(ok=False))
+
+    assert "!approve" not in hint
+    assert hint == "Nicht aktivierbar, bis Validation OK ist. Pruefen mit `!review broken_plugin`."
+
+
+def test_approved_plugin_source_is_reference_for_pending_edits(tmp_path):
+    bot = make_bot(tmp_path)
+    bot.plugins.ensure_dirs()
+    approved_path = bot.plugins.approved_dir / "demo_plugin.py"
+    pending_path = bot.plugins.pending_dir / "demo_plugin.py"
+    approved_path.write_text(PLUGIN_SOURCE, encoding="utf-8")
+    pending_path.write_text("def broken(:\n", encoding="utf-8")
+
+    reference = approved_plugin_source_for_reference(bot, "demo_plugin", pending_path)
+
+    assert reference == PLUGIN_SOURCE
+    assert approved_plugin_source_for_reference(bot, "demo_plugin", approved_path) == ""

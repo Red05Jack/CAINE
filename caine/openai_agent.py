@@ -28,6 +28,24 @@ class PluginUpdateDraft(BaseModel):
     safety_notes: list[str] = Field(default_factory=list)
 
 
+class PluginSourceEdit(BaseModel):
+    old: str = Field(description="Exact existing source snippet to replace")
+    new: str = Field(description="Replacement source snippet")
+    note: str = Field(default="", description="Short reason for this edit")
+
+
+class PluginUpdatePatchDraft(BaseModel):
+    name: str = Field(description="Plugin name")
+    description: str = Field(description="Short description of the update")
+    edits: list[PluginSourceEdit] = Field(description="Minimal exact source replacements")
+    change_summary: str = Field(description="What changed in this version")
+    safety_notes: list[str] = Field(default_factory=list)
+
+
+class PluginPatchApplyError(ValueError):
+    pass
+
+
 class CommandRoute(BaseModel):
     command_name: str = Field(default="", description="Existing command name to run, or empty string")
     args: str = Field(default="", description="Arguments to pass to the command")
@@ -459,6 +477,7 @@ class OpenAIAgent:
         current_source: str,
         request: str,
         author_name: str,
+        approved_source: str = "",
     ) -> PluginUpdateDraft:
         return await asyncio.to_thread(
             self._update_plugin_sync,
@@ -466,6 +485,7 @@ class OpenAIAgent:
             current_source,
             request,
             author_name,
+            approved_source,
         )
 
     async def health_check(self) -> str:
@@ -758,9 +778,11 @@ class OpenAIAgent:
         current_source: str,
         request: str,
         author_name: str,
+        approved_source: str = "",
     ) -> PluginUpdateDraft:
         model = self._code_model_name()
         instructions = self._plugin_update_instructions()
+        approved_reference = _approved_source_reference_block(current_source, approved_source)
 
         user_input = dedent(
             f"""
@@ -769,10 +791,12 @@ class OpenAIAgent:
             Requested change:
             {request}
 
-            Current plugin code:
+            Primary plugin code to edit:
             ```python
             {current_source}
             ```
+
+            {approved_reference}
             """
         ).strip()
         self._log_activity(
@@ -782,6 +806,8 @@ class OpenAIAgent:
             plugin_name=plugin_name,
             change_request=_text_log_summary(request),
             current_source=_text_log_summary(current_source),
+            approved_source_present=bool(approved_reference),
+            approved_source=_text_log_summary(approved_source) if approved_reference else None,
             trusted_plugins=self.trusted_plugins,
             model=model,
         )
@@ -793,15 +819,16 @@ class OpenAIAgent:
                     model=model,
                     instructions=instructions,
                     input=user_input,
-                    text_format=PluginUpdateDraft,
+                    text_format=PluginUpdatePatchDraft,
                 )
-                draft = getattr(response, "output_parsed", None)
-                if isinstance(draft, PluginUpdateDraft):
-                    draft.code = _clean_code_block(draft.code)
+                patch = getattr(response, "output_parsed", None)
+                if isinstance(patch, PluginUpdatePatchDraft):
+                    draft = _apply_plugin_update_patch(current_source, patch)
                     self._log_activity(
                         "chatgpt.update_plugin",
                         "response",
                         method="parse",
+                        patch=_plugin_update_patch_log_payload(patch),
                         draft=_plugin_update_draft_log_payload(draft),
                         model=model,
                     )
@@ -823,13 +850,13 @@ class OpenAIAgent:
                 model=model,
                 instructions=(
                     instructions
-                    + "\nReturn valid JSON with keys name, description, code, change_summary, safety_notes."
+                    + "\nReturn valid JSON with keys name, description, edits, change_summary, safety_notes."
                 ),
                 input=user_input,
             )
             payload = json.loads(getattr(response, "output_text", "{}"))
-            draft = PluginUpdateDraft.model_validate(payload)
-            draft.code = _clean_code_block(draft.code)
+            patch = PluginUpdatePatchDraft.model_validate(payload)
+            draft = _apply_plugin_update_patch(current_source, patch)
         except Exception as exc:
             self._log_activity(
                 "chatgpt.update_plugin",
@@ -843,6 +870,7 @@ class OpenAIAgent:
             "chatgpt.update_plugin",
             "response",
             method="json",
+            patch=_plugin_update_patch_log_payload(patch),
             draft=_plugin_update_draft_log_payload(draft),
             model=model,
         )
@@ -974,10 +1002,26 @@ class OpenAIAgent:
             f"""
             You update an existing Python plugin for a Discord bot.
 
-            Return a complete replacement Python file in the `code` field.
-            Do not return a diff and do not use markdown fences.
+            Return only a minimal list of exact source replacements in the
+            `edits` field. Do not return a complete replacement file and do
+            not use markdown fences.
 
             Requirements:
+            - Each edit is {{"old": "...", "new": "...", "note": "..."}}.
+            - `old` must be copied exactly from the current plugin code and
+              must occur exactly once. Include enough surrounding lines to make
+              the replacement unambiguous.
+            - The primary plugin code is the only source CAINE will patch.
+              If an approved reference is provided, use it only to understand
+              the last stable behavior or repair a broken pending draft.
+              Never copy `old` snippets from the approved reference unless the
+              exact same snippet also exists in the primary plugin code.
+            - `new` must be the complete replacement for that exact old
+              snippet. Keep unchanged surrounding lines inside `new` when they
+              are part of the snippet.
+            - Prefer a few small edits over rewriting whole files.
+            - If adding new code, replace a nearby stable block with that same
+              block plus the new lines inserted.
             - Preserve the existing PLUGIN name unless the user explicitly asks to rename it.
             - Preserve existing commands and behavior unless the requested change requires edits.
             - When adding or reshaping behavior, apply the CAINE plugin hierarchy:
@@ -999,8 +1043,9 @@ class OpenAIAgent:
             """,
             """
             This API call returns a structured object, not a free-form concept.
-            Obey the Python plugin contract and use the showmaster style only
-            where it improves user-facing plugin text, descriptions, and
+            CAINE applies your edits locally and validates the resulting Python
+            file. Obey the Python plugin contract and use the showmaster style
+            only where it improves user-facing plugin text, descriptions, and
             command replies.
             """,
         )
@@ -1041,6 +1086,62 @@ class OpenAIAgent:
                 **payload,
             },
         )
+
+
+def _apply_plugin_update_patch(current_source: str, patch: PluginUpdatePatchDraft) -> PluginUpdateDraft:
+    updated_source = current_source
+    if not patch.edits:
+        raise PluginPatchApplyError("Das Modell hat keine Code-Aenderungen geliefert.")
+
+    for index, edit in enumerate(patch.edits, start=1):
+        old = _clean_patch_snippet(edit.old)
+        new = _clean_patch_snippet(edit.new)
+        if not old:
+            raise PluginPatchApplyError(f"Patch {index} enthaelt keinen alten Codeblock.")
+        occurrences = updated_source.count(old)
+        if occurrences != 1:
+            raise PluginPatchApplyError(
+                f"Patch {index} passt nicht eindeutig: alter Codeblock wurde {occurrences}x gefunden."
+            )
+        updated_source = updated_source.replace(old, new, 1)
+
+    return PluginUpdateDraft(
+        name=patch.name,
+        description=patch.description,
+        code=_ensure_trailing_newline(updated_source),
+        change_summary=patch.change_summary,
+        safety_notes=patch.safety_notes,
+    )
+
+
+def _approved_source_reference_block(current_source: str, approved_source: str) -> str:
+    approved_source = str(approved_source or "")
+    if not approved_source.strip() or approved_source == current_source:
+        return ""
+    return dedent(
+        f"""
+        Approved plugin code for reference only:
+        ```python
+        {approved_source}
+        ```
+        """
+    ).strip()
+
+
+def _clean_patch_snippet(value: str) -> str:
+    text = str(value or "")
+    if not text.strip().startswith("```"):
+        return text
+    lines = text.strip().splitlines()
+    if lines and lines[0].strip().startswith("```"):
+        lines = lines[1:]
+    if lines and lines[-1].strip().startswith("```"):
+        lines = lines[:-1]
+    return "\n".join(lines)
+
+
+def _ensure_trailing_newline(value: str) -> str:
+    return value if value.endswith("\n") else value + "\n"
 
 
 def _clean_code_block(value: str) -> str:
@@ -1138,6 +1239,24 @@ def _plugin_update_draft_log_payload(draft: PluginUpdateDraft) -> dict[str, Any]
         "change_summary": draft.change_summary,
         "code": _text_log_summary(draft.code, limit=1200),
         "safety_notes": draft.safety_notes,
+    }
+
+
+def _plugin_update_patch_log_payload(patch: PluginUpdatePatchDraft) -> dict[str, Any]:
+    return {
+        "name": patch.name,
+        "description": patch.description,
+        "change_summary": patch.change_summary,
+        "edit_count": len(patch.edits),
+        "edits": [
+            {
+                "note": edit.note,
+                "old": _text_log_summary(edit.old, limit=500),
+                "new": _text_log_summary(edit.new, limit=500),
+            }
+            for edit in patch.edits
+        ],
+        "safety_notes": patch.safety_notes,
     }
 
 

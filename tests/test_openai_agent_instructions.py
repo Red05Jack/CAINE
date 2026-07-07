@@ -48,6 +48,8 @@ def test_plugin_update_instructions_keep_hierarchy_contract():
     assert "S1 kinger" in instructions
     assert "Python-level API for other plugins" in instructions
     assert "Slash commands are currently S3/user-only" in instructions
+    assert "Return only a minimal list of exact source replacements" in instructions
+    assert "Do not return a complete replacement file" in instructions
 
 
 def test_command_router_prompt_includes_replied_caine_message_context():

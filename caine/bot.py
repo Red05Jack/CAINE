@@ -22,6 +22,7 @@ from caine.config import Settings, load_settings
 from caine.openai_agent import (
     CommandRoute,
     OpenAIAgent,
+    PluginPatchApplyError,
     chatgpt_activity_log_path,
     read_chatgpt_activity_log,
     summarize_chatgpt_activity_entry,
@@ -295,7 +296,7 @@ def install_commands(bot: CaineBot) -> None:
                     f"Command: `{bot.settings.command_prefix}{draft.command_name}`",
                     f"Datei: `{relative(path, bot.settings.project_root)}`",
                     f"Validation: `{details}`",
-                    f"Aktivieren mit `{bot.settings.command_prefix}approve {plugin_id}`.",
+                    pending_activation_hint(bot.settings.command_prefix, plugin_id, validation),
                 ]
             )[:1900],
             mention_author=False,
@@ -337,6 +338,7 @@ def install_commands(bot: CaineBot) -> None:
 
         current_source = source_info.path.read_text(encoding="utf-8")
         target_plugin_id = source_info.replaces or source_info.plugin_id
+        approved_source = approved_plugin_source_for_reference(bot, target_plugin_id, source_info.path)
         try:
             async with ctx.typing():
                 draft = await bot.agent.update_plugin(
@@ -344,6 +346,7 @@ def install_commands(bot: CaineBot) -> None:
                     current_source,
                     request_text,
                     ctx.author.display_name,
+                    approved_source=approved_source,
                 )
                 pending_id, path, validation = bot.plugins.save_pending_revision(
                     target_plugin_id,
@@ -352,6 +355,13 @@ def install_commands(bot: CaineBot) -> None:
                 )
         except OpenAIError as exc:
             await ctx.reply(f"OpenAI-Fehler beim Bearbeiten: `{str(exc)[:700]}`", mention_author=False)
+            return
+        except PluginPatchApplyError as exc:
+            await ctx.reply(
+                "Update konnte nicht eindeutig angewendet werden: "
+                f"`{str(exc)[:700]}`. Bitte versuch es mit einer etwas genaueren Aenderungsbeschreibung erneut.",
+                mention_author=False,
+            )
             return
 
         status = "bereit fuer Review" if validation.ok else "Validator hat Probleme gefunden"
@@ -363,7 +373,7 @@ def install_commands(bot: CaineBot) -> None:
                     f"Neue Datei: `{relative(path, bot.settings.project_root)}`",
                     f"Aenderung: {draft.change_summary}",
                     f"Validation: `{validation.summary()}`",
-                    f"Aktivieren/alte Version ersetzen mit `{bot.settings.command_prefix}approve {pending_id}`.",
+                    pending_activation_hint(bot.settings.command_prefix, pending_id, validation, replacement=True),
                 ]
             )[:1900],
             mention_author=False,
@@ -406,6 +416,14 @@ def install_commands(bot: CaineBot) -> None:
         async with ctx.typing():
             try:
                 loaded = await bot.plugins.approve(plugin_id)
+            except PluginValidationError as exc:
+                await ctx.reply(
+                    "Plugin-Validation fehlgeschlagen: "
+                    f"`{str(exc)[:900]}`. Kein Approve ausgefuehrt. "
+                    f"Pruefen mit `{bot.settings.command_prefix}review {plugin_id}`.",
+                    mention_author=False,
+                )
+                return
             except FileNotFoundError:
                 source_info = bot.plugins.find_plugin_source(plugin_id)
                 if source_info is not None and source_info.location == "approved":
@@ -518,6 +536,32 @@ async def send_long(ctx: commands.Context, content: str) -> None:
     chunks = [content[index : index + 1900] for index in range(0, len(content), 1900)] or [""]
     for chunk in chunks[:5]:
         await ctx.reply(chunk, mention_author=False)
+
+
+def pending_activation_hint(prefix: str, plugin_id: str, validation: object, replacement: bool = False) -> str:
+    if getattr(validation, "ok", False):
+        action = "Aktivieren/alte Version ersetzen" if replacement else "Aktivieren"
+        return f"{action} mit `{prefix}approve {plugin_id}`."
+    return (
+        "Nicht aktivierbar, bis Validation OK ist. "
+        f"Pruefen mit `{prefix}review {plugin_id}`."
+    )
+
+
+def approved_plugin_source_for_reference(bot: commands.Bot, plugin_id: str, edit_path: Path) -> str:
+    plugins = getattr(bot, "plugins", None)
+    approved_dir = getattr(plugins, "approved_dir", None)
+    if approved_dir is None:
+        return ""
+    approved_path = Path(approved_dir) / f"{slugify(plugin_id)}.py"
+    try:
+        if approved_path.resolve() == Path(edit_path).resolve():
+            return ""
+        if not approved_path.exists():
+            return ""
+        return approved_path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
 
 
 async def build_general_help_text(bot: commands.Bot, user: discord.abc.User | None = None) -> str:
