@@ -137,6 +137,8 @@ def test_kinger_help_includes_kinger_commands_but_not_admin(tmp_path):
     assert "Kinger:" in text
     assert "`!help`: Shows core commands and plugin details." in text
     assert "`!health`: Checks CAINE runtime state." in text
+    assert "`!chatgpt-logs`" in text
+    assert "Shows recent ChatGPT activity audit logs." in text
     assert "`!evolve` [S2]" not in text
     assert "Commands:" in plugin_text
     assert "Kinger:" in plugin_text

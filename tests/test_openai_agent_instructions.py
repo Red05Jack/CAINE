@@ -1,4 +1,6 @@
-from caine.openai_agent import CAINE_INSPIRED_PLUGIN_BOT_INSTRUCTIONS, OpenAIAgent
+from types import SimpleNamespace
+
+from caine.openai_agent import CAINE_INSPIRED_PLUGIN_BOT_INSTRUCTIONS, CommandRoute, OpenAIAgent
 
 
 def make_agent(trusted_plugins=False):
@@ -43,3 +45,33 @@ def test_plugin_update_instructions_keep_hierarchy_contract():
     assert "S2 admin moderation/config commands" in instructions
     assert "S1 kinger" in instructions
     assert "Python-level API for other plugins" in instructions
+
+
+def test_command_router_prompt_includes_replied_caine_message_context():
+    class FakeResponses:
+        def __init__(self):
+            self.input = ""
+            self.instructions = ""
+
+        def parse(self, *, model, instructions, input, text_format):
+            self.input = input
+            self.instructions = instructions
+            return SimpleNamespace(output_parsed=CommandRoute(command_name="ask", args="mach das", confidence=0.9))
+
+    responses = FakeResponses()
+    agent = object.__new__(OpenAIAgent)
+    agent.model = "test-model"
+    agent.client = SimpleNamespace(responses=responses)
+
+    route = agent._select_command_for_message_sync(
+        "mach das bitte",
+        "mach das bitte",
+        "Jakob",
+        [{"name": "ask", "aliases": [], "description": "Ask CAINE"}],
+        "!",
+        "CAINE: Nutze `!help level_manege` fuer Details.",
+    )
+
+    assert route.command_name == "ask"
+    assert "Replied-to CAINE message: CAINE: Nutze `!help level_manege` fuer Details." in responses.input
+    assert "replied-to message as context" in responses.instructions

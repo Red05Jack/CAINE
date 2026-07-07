@@ -23,7 +23,7 @@ except Exception:  # pragma: no cover
 
 PLUGIN = {
     'name': 'Level-Manege',
-    'description': 'XP-, Level-, Rankkarten- und Glitzerchip-Verbindungs-Apparat: /rank, !levels, Rank-Farbe, manuelle XP, Recalculate-Werkzeuge und Level-Up-Geldbelohnungen via glitzerchip_manege.'
+    'description': 'XP-, Level- und Rankkarten-Apparat: /rank mit HTML-inspirierter Karte, !levels Top-10-Rangliste, Rank-Farbe, manuelle XP und Recalculate-Werkzeuge.'
 }
 
 _STORAGE_KEY = 'level_manege_state_v1'
@@ -38,19 +38,188 @@ _COMMAND_PREFIXES = ('!', '/')
 _COOLDOWNS: Dict[Tuple[str, int, int], float] = {}
 _STATE_LOCK = asyncio.Lock()
 
-_GLITZER_DEFAULTS = {
-    'glitzerchipEnabled': True,
-    'glitzerchipRewardBase': 25,
-    'glitzerchipRewardPerLevel': 5,
-    'glitzerchipRewardMaxPerLevel': 500,
-    'glitzerchipCurrencyName': 'Glitzerchips',
-    'glitzerchipAnnounce': True
-}
-
+# Die gelieferte rank.html bleibt als Referenz im Plugin. Discord kann HTML nicht
+# direkt als Bild verschicken; deshalb zeichnet _make_rank_card_png dieselbe Karte
+# mit Pillow als transparentes PNG nach: 980x170 Balken, Avatar links herausragend,
+# dunkler Strip, Rang/Level rechts, XP-Fortschritt links.
 RANK_HTML_TEMPLATE = '''<!DOCTYPE html>
 <html lang="de">
-<head><meta charset="UTF-8" /><title>Rank Card</title></head>
-<body><!-- Referenztemplate: Die echte Discord-Ausgabe wird aus Kompatibilitaetsgruenden mit Pillow als PNG gezeichnet. --></body>
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Rank Card</title>
+
+  <style>
+    * {{
+      box-sizing: border-box;
+    }}
+
+    body {{
+      min-height: 100vh;
+      margin: 0;
+      background: transparent;
+      display: grid;
+      place-items: center;
+      font-family: Arial, Helvetica, sans-serif;
+    }}
+
+    .rank-card {{
+      --progress: {progress_percent}%;
+
+      position: relative;
+      width: 980px;
+      height: 170px;
+      overflow: visible;
+    }}
+
+    .card-mask {{
+      position: absolute;
+      inset: 0;
+      border: 4px solid {border_color};
+      border-left: none;
+      border-radius: 0 86px 86px 0;
+      background: #05070c;
+      overflow: hidden;
+    }}
+
+    .bar-content {{
+      position: absolute;
+      left: 0;
+      top: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      z-index: 1;
+    }}
+
+    .bar {{
+      position: absolute;
+      left: 0;
+      top: -100%;
+      width: var(--progress);
+      height: 300%;
+
+      background: {bar_color};
+      filter: blur(26px);
+    }}
+
+    .readability-strip {{
+      position: absolute;
+      left: 72px;
+      right: 24px;
+      top: 21px;
+      height: 122px;
+      border-radius: 0 64px 64px 0;
+      background: rgba(0, 0, 0, 0.5);
+      z-index: 3;
+    }}
+
+    .avatar-wrap {{
+      position: absolute;
+      left: -78px;
+      top: 50%;
+      width: 180px;
+      height: 180px;
+      transform: translateY(-50%);
+      border-radius: 50%;
+      overflow: hidden;
+      background: #111;
+      z-index: 10;
+    }}
+
+    .avatar {{
+      width: 100%;
+      height: 100%;
+      background-image: url("{avatar_url}");
+      background-size: cover;
+      background-position: center;
+      background-repeat: no-repeat;
+    }}
+
+    .player-name {{
+      position: absolute;
+      left: 135px;
+      top: 38px;
+      font-size: 42px;
+      font-weight: 700;
+      letter-spacing: 1px;
+      line-height: 1;
+      color: #ffffff;
+      z-index: 4;
+    }}
+
+    .xp-text {{
+      position: absolute;
+      left: 135px;
+      top: 98px;
+      font-size: 32px;
+      font-weight: 400;
+      letter-spacing: 1px;
+      line-height: 1;
+      color: rgba(255, 255, 255, 0.55);
+      z-index: 4;
+    }}
+
+.rank-info {{
+  position: absolute;
+  right: 58px;
+  top: 50%;
+  transform: translateY(-50%);
+
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  white-space: nowrap;
+  line-height: 1;
+
+  z-index: 4;
+}}
+
+    .rank-label {{
+      font-size: 30px;
+      font-weight: 400;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+      color: rgba(255, 255, 255, 0.6);
+    }}
+
+    .rank-value,
+    .level-value {{
+      font-size: 44px;
+      font-weight: 700;
+      color: #ffffff;
+    }}
+  </style>
+</head>
+
+<body>
+
+  <div class="rank-card">
+    <div class="card-mask">
+
+      <div class="bar-content">
+        <div class="bar"></div>
+      </div>
+
+      <div class="readability-strip"></div>
+
+      <div class="player-name">{username}</div>
+      <div class="xp-text">{xp_text}</div>
+
+      <div class="rank-info">
+        <span class="rank-label">RANG</span>
+        <span class="rank-value">#{rank}</span>
+        <span class="rank-label">LEVEL</span>
+        <span class="level-value">{level}</span>
+      </div>
+    </div>
+
+    <div class="avatar-wrap">
+      <div class="avatar"></div>
+    </div>
+  </div>
+
+</body>
 </html>'''
 
 
@@ -115,14 +284,12 @@ def _ensure_guild(state: Dict[str, Any], guild_id: int) -> Dict[str, Any]:
     guild_state.setdefault('users', {})
     guild_state.setdefault('message_xp', {})
     guild_state.setdefault('ledger', [])
-    guild_state.setdefault('glitzerchip_rewards', {})
-    settings = guild_state.setdefault('settings', {})
-    settings.setdefault('messageXpMin', _MESSAGE_XP_MIN)
-    settings.setdefault('messageXpMax', _MESSAGE_XP_MAX)
-    settings.setdefault('levelUpChannelId', 0)
-    settings.setdefault('rewardBots', False)
-    for key, value in _GLITZER_DEFAULTS.items():
-        settings.setdefault(key, value)
+    guild_state.setdefault('settings', {
+        'messageXpMin': _MESSAGE_XP_MIN,
+        'messageXpMax': _MESSAGE_XP_MAX,
+        'levelUpChannelId': 0,
+        'rewardBots': False
+    })
     return guild_state
 
 
@@ -135,18 +302,9 @@ def _ensure_user(guild_state: Dict[str, Any], user_id: int) -> Dict[str, Any]:
     user.setdefault('manual_xp', 0)
     user.setdefault('message_count', 0)
     user.setdefault('rank_color', _DEFAULT_COLOR)
-    if user.get('rank_color') == _OLD_DEFAULT_COLOR:
-        user['rank_color'] = _DEFAULT_COLOR
     user.setdefault('last_seen_name', 'Unbekannt')
     user.setdefault('updated_at', _now_iso())
     return user
-
-
-def _settings(guild_state: Dict[str, Any]) -> Dict[str, Any]:
-    s = guild_state.setdefault('settings', {})
-    for key, value in _GLITZER_DEFAULTS.items():
-        s.setdefault(key, value)
-    return s
 
 
 def _total_xp(user: Dict[str, Any]) -> int:
@@ -179,16 +337,12 @@ def compact_number(value: int) -> str:
 
 
 def calculate_message_xp(message_id: int, min_xp: int = _MESSAGE_XP_MIN, max_xp: int = _MESSAGE_XP_MAX) -> int:
-    min_xp = int(min_xp)
-    max_xp = int(max_xp)
-    if max_xp < min_xp:
-        min_xp, max_xp = max_xp, min_xp
     mask = (1 << 64) - 1
     value = (int(message_id) + 0x9E3779B97F4A7C15) & mask
     value = ((value ^ (value >> 30)) * 0xBF58476D1CE4E5B9) & mask
     value = ((value ^ (value >> 27)) * 0x94D049BB133111EB) & mask
     value = (value ^ (value >> 31)) & mask
-    return min_xp + int(value % (max_xp - min_xp + 1))
+    return int(min_xp) + int(value % (int(max_xp) - int(min_xp) + 1))
 
 
 def _parse_user_id(tokens: List[str]) -> Optional[int]:
@@ -212,13 +366,6 @@ def _normalize_args(args: Any) -> List[str]:
         return []
     if isinstance(args, str):
         return [part for part in args.strip().split() if part]
-    if isinstance(args, dict):
-        out = []
-        for key in sorted(args.keys()):
-            value = args.get(key)
-            if value is not None:
-                out.append(str(value))
-        return out
     return [str(part) for part in args if str(part).strip()]
 
 
@@ -251,8 +398,7 @@ def _is_xp_excluded_command(content: str) -> bool:
         'help', 'levels', 'leaderboard', 'rangliste',
         'rank', 'set-rank-color', 'set-rank-colour', 'remove-xp', 'removexp',
         'give-xp', 'givexp', 'importdb', 'recalculate', 'xp-liste',
-        'einladungen-nachbearbeiten', 'level-money', 'level-geld', 'level-glitzerchips',
-        'level-money-info', 'levelgeld', 'level-money-audit', 'level-geld-audit'
+        'einladungen-nachbearbeiten'
     }
 
 
@@ -331,8 +477,16 @@ def _font(size: int, bold: bool = False) -> Any:
         return None
     candidates = []
     if bold:
-        candidates.extend(['/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf', '/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf', 'arialbd.ttf'])
-    candidates.extend(['/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf', '/usr/share/fonts/dejavu/DejaVuSans.ttf', 'arial.ttf'])
+        candidates.extend([
+            '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf',
+            '/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf',
+            'arialbd.ttf'
+        ])
+    candidates.extend([
+        '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
+        '/usr/share/fonts/dejavu/DejaVuSans.ttf',
+        'arial.ttf'
+    ])
     for path in candidates:
         try:
             return ImageFont.truetype(path, size=size)
@@ -433,8 +587,9 @@ def _fit_text(draw: Any, text: str, font: Any, max_width: int) -> str:
 
 def _make_rank_card_png(username: str, rank: int, level: int, progress: int, needed: int, total_xp: int, color: str, avatar_bytes: Optional[bytes]) -> bytes:
     if Image is None or ImageDraw is None:
-        return bytes.fromhex('89504E470D0A1A0A0000000D4948445200000001000000010806000002000100FFFF03000006000557BFAB0000000049454E44AE426082')
+        return bytes.fromhex('89504E470D0A1A0A0000000D49484452000000010000000108060000001F15C4890000000A49444154789C6360000002000100FFFF03000006000557BFAB0000000049454E44AE426082')
 
+    # HTML layout: rank-card 980x170, avatar 78px protruding left, no body bg.
     W, H = 1094, 180
     card_x, card_y, card_w, card_h = 78, 5, 980, 170
     accent = _hex_to_rgb(color)
@@ -543,200 +698,9 @@ async def _send_rank_card(ctx: Any, api: Any, png_bytes: bytes) -> None:
     await api.reply(ctx, 'Die Rank-Karte wurde gezeichnet, aber ich konnte keine Datei senden. Prüfe bitte meine Kanalrechte: View Channel, Send Messages und Attach Files.')
 
 
-def _cooldown_ok(command: str, guild_id: int, user_id: int, seconds: int) -> Tuple[bool, int]:
-    now = time.monotonic()
-    key = (command, int(guild_id), int(user_id))
-    until = _COOLDOWNS.get(key, 0.0)
-    if until > now:
-        return False, int(math.ceil(until - now))
-    _COOLDOWNS[key] = now + seconds
-    return True, 0
-
-
-def _display_name_for(guild: Any, uid: int, user: Dict[str, Any]) -> str:
-    member = guild.get_member(uid) if guild is not None and hasattr(guild, 'get_member') else None
-    if member is not None:
-        return str(getattr(member, 'display_name', getattr(member, 'name', uid)))
-    return str(user.get('last_seen_name') or uid)
-
-
-def _glitzer_reward_for_level(settings: Dict[str, Any], level: int) -> int:
-    base = max(0, int(settings.get('glitzerchipRewardBase', _GLITZER_DEFAULTS['glitzerchipRewardBase'])))
-    per = max(0, int(settings.get('glitzerchipRewardPerLevel', _GLITZER_DEFAULTS['glitzerchipRewardPerLevel'])))
-    cap = max(0, int(settings.get('glitzerchipRewardMaxPerLevel', _GLITZER_DEFAULTS['glitzerchipRewardMaxPerLevel'])))
-    amount = base + max(0, int(level)) * per
-    return min(amount, cap) if cap > 0 else amount
-
-
-async def _maybe_await(value: Any) -> Any:
-    if hasattr(value, '__await__'):
-        return await value
-    return value
-
-
-async def _call_credit_function(func: Any, payload: Dict[str, Any]) -> Tuple[bool, Any, str]:
-    attempts = [
-        lambda: func(**payload),
-        lambda: func(payload),
-        lambda: func(payload.get('guild_id'), payload.get('user_id'), payload.get('amount'), payload.get('reason')),
-        lambda: func(int(payload.get('guild_id')), int(payload.get('user_id')), int(payload.get('amount')), payload.get('reason')),
-    ]
-    last_error = ''
-    for attempt in attempts:
-        try:
-            result = await _maybe_await(attempt())
-            if result is not False:
-                return True, result, ''
-        except TypeError as exc:
-            last_error = str(exc)[:180]
-            continue
-        except Exception as exc:
-            return False, None, str(exc)[:180]
-    return False, None, last_error or 'keine passende Signatur'
-
-
-def _shared_glitzer_api(api: Any) -> Any:
-    shared = getattr(api, 'shared', None)
-    if not isinstance(shared, dict):
-        return None
-    for key in ('glitzerchip_manege.api', 'glitzerchip_manege', 'glitzerchips.api'):
-        candidate = shared.get(key)
-        if candidate is not None:
-            return candidate
-    return None
-
-
-async def _credit_glitzerchips(api: Any, payload: Dict[str, Any]) -> Tuple[str, str]:
-    shared_api = _shared_glitzer_api(api)
-    if shared_api is not None:
-        names = ('credit', 'add_balance', 'add_money', 'deposit', 'award', 'give', 'add_chips', 'grant')
-        for name in names:
-            func = shared_api.get(name) if isinstance(shared_api, dict) else getattr(shared_api, name, None)
-            if callable(func):
-                ok, _result, error = await _call_credit_function(func, payload)
-                if ok:
-                    return 'credited', f'shared:{name}'
-                if error:
-                    return 'failed', f'shared:{name}:{error}'
-    try:
-        await api.emit('glitzerchip_manege.credit', payload)
-        return 'emitted', 'emit:glitzerchip_manege.credit'
-    except Exception as exc:
-        return 'failed', f'emit:{str(exc)[:180]}'
-
-
-async def _reserve_glitzer_rewards(api: Any, guild_id: int, user_id: int, movement: Dict[str, Any]) -> Dict[str, Any]:
-    old_level = int(movement.get('old_level', 0))
-    new_level = int(movement.get('new_level', 0))
-    if new_level <= old_level:
-        return {'enabled': False, 'amount': 0, 'currency': 'Glitzerchips', 'entries': [], 'status': 'none'}
-
-    async with _STATE_LOCK:
-        state = await _storage_get(api)
-        gs = _ensure_guild(state, guild_id)
-        settings = _settings(gs)
-        currency = str(settings.get('glitzerchipCurrencyName', 'Glitzerchips'))
-        if not bool(settings.get('glitzerchipEnabled', True)):
-            return {'enabled': False, 'amount': 0, 'currency': currency, 'entries': [], 'status': 'disabled'}
-        rewards = gs.setdefault('glitzerchip_rewards', {})
-        entries = []
-        total = 0
-        for level in range(old_level + 1, new_level + 1):
-            amount = _glitzer_reward_for_level(settings, level)
-            if amount <= 0:
-                continue
-            ref = f'level_manege:level_reward:{guild_id}:{user_id}:{level}'
-            if ref in rewards:
-                continue
-            entry = {
-                'reference_id': ref,
-                'guild_id': str(guild_id),
-                'user_id': str(user_id),
-                'level': int(level),
-                'amount': int(amount),
-                'currency': currency,
-                'status': 'pending',
-                'created_at_utc': _now_iso(),
-                'updated_at_utc': _now_iso(),
-                'source': 'level_manege'
-            }
-            rewards[ref] = entry
-            entries.append(entry)
-            total += amount
-        if entries:
-            await _storage_set(api, state)
-        return {'enabled': True, 'amount': total, 'currency': currency, 'entries': entries, 'status': 'pending' if entries else 'already_rewarded'}
-
-
-async def _finalize_glitzer_rewards(api: Any, guild_id: int, entries: List[Dict[str, Any]], status: str, detail: str) -> None:
-    if not entries:
-        return
-    async with _STATE_LOCK:
-        state = await _storage_get(api)
-        gs = _ensure_guild(state, guild_id)
-        rewards = gs.setdefault('glitzerchip_rewards', {})
-        for entry in entries:
-            ref = entry.get('reference_id')
-            if ref in rewards:
-                rewards[ref]['status'] = status
-                rewards[ref]['detail'] = detail[:220]
-                rewards[ref]['updated_at_utc'] = _now_iso()
-        await _storage_set(api, state)
-
-
-async def _maybe_award_glitzerchips(api: Any, guild_id: int, user_id: int, movement: Dict[str, Any]) -> Dict[str, Any]:
-    reservation = await _reserve_glitzer_rewards(api, guild_id, user_id, movement)
-    entries = reservation.get('entries', [])
-    amount = int(reservation.get('amount', 0))
-    currency = str(reservation.get('currency', 'Glitzerchips'))
-    if amount <= 0 or not entries:
-        return reservation
-    payload = {
-        'guild_id': str(guild_id),
-        'user_id': str(user_id),
-        'amount': amount,
-        'currency': currency,
-        'reason': f'Level-Up Belohnung: Level {movement.get("old_level", 0)} -> {movement.get("new_level", 0)}',
-        'source': 'level_manege',
-        'reference_id': hashlib.sha256(('|'.join([str(e.get('reference_id')) for e in entries])).encode('utf-8')).hexdigest(),
-        'metadata': {
-            'old_level': int(movement.get('old_level', 0)),
-            'new_level': int(movement.get('new_level', 0)),
-            'entries': entries
-        }
-    }
-    status, detail = await _credit_glitzerchips(api, payload)
-    await _finalize_glitzer_rewards(api, guild_id, entries, status, detail)
-    reservation['status'] = status
-    reservation['detail'] = detail
-    try:
-        await api.emit('level_manege.glitzerchip_rewarded', dict(payload, status=status, detail=detail))
-    except Exception:
-        pass
-    return reservation
-
-
 async def _maybe_send_levelup(api: Any, ctx_or_message: Any, user_id: int, movement: Dict[str, Any]) -> None:
     if not movement.get('applied') or int(movement.get('new_level', 0)) <= int(movement.get('old_level', 0)):
         return
-    guild_id = _guild_id_from_ctx(ctx_or_message)
-    if guild_id is None:
-        guild = getattr(ctx_or_message, 'guild', None)
-        guild_id = int(getattr(guild, 'id', 0) or 0)
-    reward = {'amount': 0, 'currency': 'Glitzerchips', 'status': 'none'}
-    if guild_id:
-        reward = await _maybe_award_glitzerchips(api, int(guild_id), int(user_id), movement)
-    try:
-        await api.emit('level_manege.level_up', {
-            'guild_id': str(guild_id or ''),
-            'user_id': str(user_id),
-            'old_level': int(movement.get('old_level', 0)),
-            'new_level': int(movement.get('new_level', 0)),
-            'new_xp': int(movement.get('new_xp', 0)),
-            'glitzerchip_reward': reward
-        })
-    except Exception:
-        pass
     channel = _channel_from_ctx(ctx_or_message)
     new_level = int(movement.get('new_level', 0))
     total = int(movement.get('new_xp', 0))
@@ -755,12 +719,6 @@ async def _maybe_send_levelup(api: Any, ctx_or_message: Any, user_id: int, movem
     elif new_level >= 5:
         title = 'Der Aufsteiger'
     text = f'Endlich, <@{user_id}> - {title} - hat Level **{new_level}** erreicht!\nGesamt-XP: **{total}** | Bis Level {new_level + 1}: **{max(0, needed)} XP**'
-    if int(reward.get('amount', 0)) > 0 and bool(reward.get('enabled', True)):
-        status = str(reward.get('status', ''))
-        if status in {'credited', 'emitted'}:
-            text += f'\nGlitzerchip-Manege gekoppelt: **+{compact_number(int(reward.get("amount", 0)))} {reward.get("currency", "Glitzerchips")}**!'
-        elif status == 'failed':
-            text += f'\nGlitzerchip-Belohnung vorgemerkt, aber der Geld-Apparat hat gehustet. Kinger-Audit empfohlen.'
     try:
         if channel is not None and hasattr(channel, 'send'):
             await channel.send(text)
@@ -773,65 +731,24 @@ async def _maybe_send_levelup(api: Any, ctx_or_message: Any, user_id: int, movem
             pass
 
 
+def _cooldown_ok(command: str, guild_id: int, user_id: int, seconds: int) -> Tuple[bool, int]:
+    now = time.monotonic()
+    key = (command, int(guild_id), int(user_id))
+    until = _COOLDOWNS.get(key, 0.0)
+    if until > now:
+        return False, int(math.ceil(until - now))
+    _COOLDOWNS[key] = now + seconds
+    return True, 0
+
+
+def _display_name_for(guild: Any, uid: int, user: Dict[str, Any]) -> str:
+    member = guild.get_member(uid) if guild is not None and hasattr(guild, 'get_member') else None
+    if member is not None:
+        return str(getattr(member, 'display_name', getattr(member, 'name', uid)))
+    return str(user.get('last_seen_name') or uid)
+
+
 async def setup_plugin(api):
-    async def api_get_profile(guild_id: Any, user_id: Any, guild: Any = None) -> Dict[str, Any]:
-        async with _STATE_LOCK:
-            state = await _storage_get(api)
-            gs = _ensure_guild(state, int(guild_id))
-            user = _ensure_user(gs, int(user_id))
-            total = _total_xp(user)
-            level, progress, needed = level_from_xp(total)
-            rank = _rank_for_user(gs, int(user_id), guild)
-            return {
-                'guild_id': str(guild_id),
-                'user_id': str(user_id),
-                'rank': rank,
-                'level': level,
-                'progress': progress,
-                'needed': needed,
-                'total_xp': total,
-                'message_xp': int(user.get('message_xp', 0)),
-                'voice_xp': int(user.get('voice_xp', 0)),
-                'invite_xp': int(user.get('invite_xp', 0)),
-                'manual_xp': int(user.get('manual_xp', 0)),
-                'rank_color': user.get('rank_color', _DEFAULT_COLOR),
-                'last_seen_name': user.get('last_seen_name', 'Unbekannt')
-            }
-
-    async def api_add_xp(guild_id: Any, user_id: Any, amount: Any, reason: str = 'api-add-xp', actor_id: Any = 0) -> Dict[str, Any]:
-        reference_id = f'api-add-xp:{guild_id}:{user_id}:{amount}:{time.time_ns()}'
-        async with _STATE_LOCK:
-            state = await _storage_get(api)
-            gs = _ensure_guild(state, int(guild_id))
-            movement = _apply_manual_xp(gs, int(guild_id), int(user_id), int(amount), str(reason)[:160], reference_id, int(actor_id or 0))
-            await _storage_set(api, state)
-        if movement.get('applied') and int(movement.get('new_level', 0)) > int(movement.get('old_level', 0)):
-            await _maybe_award_glitzerchips(api, int(guild_id), int(user_id), movement)
-        return movement
-
-    async def api_get_settings(guild_id: Any) -> Dict[str, Any]:
-        async with _STATE_LOCK:
-            state = await _storage_get(api)
-            gs = _ensure_guild(state, int(guild_id))
-            return dict(_settings(gs))
-
-    async def api_export_snapshot(payload: Any = None) -> Dict[str, Any]:
-        return await _storage_get(api)
-
-    try:
-        if isinstance(getattr(api, 'shared', None), dict):
-            api.shared['level_manege.api'] = {
-                'get_profile': api_get_profile,
-                'add_xp': api_add_xp,
-                'get_settings': api_get_settings,
-                'level_from_xp': level_from_xp,
-                'xp_for_next_level': xp_for_next_level,
-                'calculate_message_xp': calculate_message_xp,
-                'export_snapshot': api_export_snapshot
-            }
-    except Exception:
-        pass
-
     @api.command({
         'names': ['levels', 'leaderboard', 'rangliste'],
         'description': 'Zeigt die höchsten 10 Plätze der Server-Rangliste.',
@@ -921,7 +838,6 @@ async def setup_plugin(api):
         level, progress, needed = level_from_xp(total)
         rank = _rank_for_user(gs, target_id, guild)
         if debug_requested:
-            settings = _settings(gs)
             await api.reply(ctx,
                 '**[DEBUG] Rank-Kabinett geöffnet**\n'
                 f'User-ID: `{target_id}`\n'
@@ -934,8 +850,7 @@ async def setup_plugin(api):
                 f'Invite-XP: `{int(user.get("invite_xp", 0))}`\n'
                 f'Manual-XP: `{int(user.get("manual_xp", 0))}`\n'
                 f'Gewertete Nachrichten: `{int(user.get("message_count", 0))}`\n'
-                f'Rank-Farbe: `{user.get("rank_color", _DEFAULT_COLOR)}`\n'
-                f'Glitzerchip-Link: `{bool(settings.get("glitzerchipEnabled", True))}`'
+                f'Rank-Farbe: `{user.get("rank_color", _DEFAULT_COLOR)}`'
             )
             return
         username = user.get('last_seen_name') or str(target_id)
@@ -976,40 +891,6 @@ async def setup_plugin(api):
             user['updated_at'] = _now_iso()
             await _storage_set(api, state)
         await api.reply(ctx, f'Vorhang auf! Deine Rank-Karten-Glut leuchtet nun in `{color}`.')
-
-    @api.command({
-        'names': ['level-money-info', 'level-glitzerchips', 'levelgeld'],
-        'description': 'Zeigt, wie Level-Ups mit Glitzerchips verbunden sind.',
-        'level': 'user',
-        'options': []
-    })
-    async def level_money_info_command(ctx, args):
-        guild_id = _guild_id_from_ctx(ctx)
-        author = _author_from_ctx(ctx)
-        if guild_id is None or author is None:
-            await api.reply(ctx, 'Diese Geld-Manege steht nur auf Serverboden, nicht im DM-Nebel.')
-            return
-        ok, wait = _cooldown_ok('level-money-info', guild_id, int(author.id), 12)
-        if not ok:
-            await api.reply(ctx, f'Der Glitzerchip-Rechner rasselt noch. Warte {wait}s.')
-            return
-        async with _STATE_LOCK:
-            state = await _storage_get(api)
-            gs = _ensure_guild(state, guild_id)
-            settings = _settings(gs)
-            user = _ensure_user(gs, int(author.id))
-            total = _total_xp(user)
-        level, _progress, _needed = level_from_xp(total)
-        next_reward = _glitzer_reward_for_level(settings, level + 1)
-        enabled = bool(settings.get('glitzerchipEnabled', True))
-        currency = str(settings.get('glitzerchipCurrencyName', 'Glitzerchips'))
-        await api.reply(ctx,
-            '**🎪 Level-Geld-Verbindung**\n'
-            f'Status: **{"aktiv" if enabled else "deaktiviert"}**\n'
-            f'Dein Level: **{level}**\n'
-            f'Nächste Level-Up-Belohnung: **{compact_number(next_reward)} {currency}**\n'
-            'Hinweis: Belohnungen werden pro erreichtem Level nur einmal vorgemerkt, damit kein Doppel-Konfetti die Kasse sprengt.'
-        )
 
     @api.command({
         'names': ['give-xp', 'givexp'],
@@ -1057,9 +938,8 @@ async def setup_plugin(api):
             member = await _resolve_member(ctx, target_id)
             if member is not None:
                 _ensure_user(gs, target_id)['last_seen_name'] = getattr(member, 'display_name', getattr(member, 'name', str(target_id)))
-            manual_xp = int(_ensure_user(gs, target_id).get('manual_xp', 0))
             await _storage_set(api, state)
-        await api.reply(ctx, f'XP-Konfetti abgefeuert für <@{target_id}>: **+{amount} XP**. Manual-XP: **{manual_xp}**, Gesamt-XP: **{movement["new_xp"]}**.')
+        await api.reply(ctx, f'XP-Konfetti abgefeuert für <@{target_id}>: **+{amount} XP**. Manual-XP: **{_ensure_user(gs, target_id).get("manual_xp", 0)}**, Gesamt-XP: **{movement["new_xp"]}**.')
         await _maybe_send_levelup(api, ctx, target_id, movement)
 
     @api.command({
@@ -1105,134 +985,8 @@ async def setup_plugin(api):
             state = await _storage_get(api)
             gs = _ensure_guild(state, guild_id)
             movement = _apply_manual_xp(gs, guild_id, target_id, -amount, reason, reference_id, int(author.id))
-            manual_xp = int(_ensure_user(gs, target_id).get('manual_xp', 0))
             await _storage_set(api, state)
-        await api.reply(ctx, f'XP-Sand abgesaugt bei <@{target_id}>: **-{amount} XP**. Manual-XP darf negativ tanzen: **{manual_xp}**, Gesamt-XP: **{movement["new_xp"]}**.')
-
-    @api.command({
-        'names': ['level-money', 'level-geld'],
-        'description': 'Admin-Konfiguration der Verbindung zwischen Level-Up und glitzerchip_manege.',
-        'level': 'admin',
-        'options': [{'name': 'action', 'description': 'status, enable, disable, reward, currency, announce', 'type': 'string', 'required': False}]
-    })
-    async def level_money_command(ctx, args):
-        guild_id = _guild_id_from_ctx(ctx)
-        author = _author_from_ctx(ctx)
-        if guild_id is None or author is None:
-            await api.reply(ctx, 'Die Level-Geld-Kupplung lässt sich nur in einer Server-Manege bedienen.')
-            return
-        if not _member_has_admin(author):
-            await api.reply(ctx, 'S2-Stoppschild! Diese Zahnradkupplung gehört der Moderation.')
-            return
-        parts = _normalize_args(args)
-        action = (parts[0].lower() if parts else 'status')
-        changed = False
-        async with _STATE_LOCK:
-            state = await _storage_get(api)
-            gs = _ensure_guild(state, guild_id)
-            settings = _settings(gs)
-            if action in {'enable', 'on', 'aktivieren'}:
-                settings['glitzerchipEnabled'] = True
-                changed = True
-            elif action in {'disable', 'off', 'deaktivieren'}:
-                settings['glitzerchipEnabled'] = False
-                changed = True
-            elif action == 'reward':
-                if len(parts) < 4:
-                    await api.reply(ctx, 'Syntax: `/level-money reward <base> <perLevel> <maxPerLevel>` — z. B. `/level-money reward 25 5 500`.')
-                    return
-                try:
-                    base = max(0, int(parts[1]))
-                    per_level = max(0, int(parts[2]))
-                    max_per = max(0, int(parts[3]))
-                except Exception:
-                    await api.reply(ctx, 'Base, perLevel und maxPerLevel müssen ganze Zahlen sein.')
-                    return
-                if base > 1_000_000 or per_level > 1_000_000 or max_per > 10_000_000:
-                    await api.reply(ctx, 'Diese Werte sind zu groß. Keine Geldkanonen ohne Sicherheitsnetz!')
-                    return
-                settings['glitzerchipRewardBase'] = base
-                settings['glitzerchipRewardPerLevel'] = per_level
-                settings['glitzerchipRewardMaxPerLevel'] = max_per
-                changed = True
-            elif action == 'currency':
-                if len(parts) < 2:
-                    await api.reply(ctx, 'Syntax: `/level-money currency Glitzerchips`')
-                    return
-                currency = ' '.join(parts[1:]).strip()[:40]
-                if not currency:
-                    await api.reply(ctx, 'Der Währungsname darf nicht leer sein.')
-                    return
-                settings['glitzerchipCurrencyName'] = currency
-                changed = True
-            elif action == 'announce':
-                if len(parts) < 2 or parts[1].lower() not in {'on', 'off', 'true', 'false', '1', '0', 'ja', 'nein'}:
-                    await api.reply(ctx, 'Syntax: `/level-money announce on|off`')
-                    return
-                settings['glitzerchipAnnounce'] = parts[1].lower() in {'on', 'true', '1', 'ja'}
-                changed = True
-            elif action not in {'status', 'show'}:
-                await api.reply(ctx, 'Unbekannte Aktion. Nutze: `status`, `enable`, `disable`, `reward`, `currency`, `announce`.')
-                return
-            if changed:
-                await _storage_set(api, state)
-            rewards_count = len(gs.get('glitzerchip_rewards', {}))
-            status_text = (
-                '**🎪 Level-Geld-Kupplung**\n'
-                f'Status: **{"aktiv" if bool(settings.get("glitzerchipEnabled", True)) else "deaktiviert"}**\n'
-                f'Währung: **{settings.get("glitzerchipCurrencyName", "Glitzerchips")}**\n'
-                f'Belohnung/Formel: **base {settings.get("glitzerchipRewardBase")} + level × {settings.get("glitzerchipRewardPerLevel")}**, gedeckelt bei **{settings.get("glitzerchipRewardMaxPerLevel")}** pro Level\n'
-                f'Level-Up-Ansage ergänzt Geld: **{"ja" if bool(settings.get("glitzerchipAnnounce", True)) else "nein"}**\n'
-                f'Vorgemerkte/ausgezahlte Reward-Einträge: **{rewards_count}**'
-            )
-        prefix = 'Gespeichert! ' if changed else ''
-        await api.reply(ctx, prefix + status_text)
-
-    @api.command({
-        'names': ['level-money-audit', 'level-geld-audit'],
-        'description': 'Kinger-Audit der Level/Geld-Verbindung und letzten Auszahlungen.',
-        'level': 'kinger',
-        'options': [{'name': 'user', 'description': 'Optionaler Nutzer.', 'type': 'user', 'required': False}]
-    })
-    async def level_money_audit_command(ctx, args):
-        guild_id = _guild_id_from_ctx(ctx)
-        author = _author_from_ctx(ctx)
-        if guild_id is None or author is None:
-            await api.reply(ctx, 'Audit nur in einer Server-Manege.')
-            return
-        if not _member_has_kinger(author):
-            await api.reply(ctx, 'S1-Kuppel geschlossen. Nur Kinger/Bot-Master dürfen den Geldmotor auditieren.')
-            return
-        parts = _normalize_args(args)
-        target_id = _parse_user_id(parts) if parts else None
-        async with _STATE_LOCK:
-            state = await _storage_get(api)
-            gs = _ensure_guild(state, guild_id)
-            settings = dict(_settings(gs))
-            rewards = list(gs.get('glitzerchip_rewards', {}).values())
-            if target_id is not None:
-                rewards = [r for r in rewards if str(r.get('user_id')) == str(target_id)]
-            rewards.sort(key=lambda r: str(r.get('updated_at_utc', r.get('created_at_utc', ''))), reverse=True)
-            total_amount = sum(int(r.get('amount', 0)) for r in rewards if str(r.get('status')) in {'credited', 'emitted'})
-            failed = sum(1 for r in rewards if str(r.get('status')) == 'failed')
-        shared_status = 'gefunden' if _shared_glitzer_api(api) is not None else 'nicht gefunden; Emit-Fallback aktiv'
-        lines = [
-            '**🎪 S1 Audit: Level ↔ Glitzerchip-Manege**',
-            f'Shared API: **{shared_status}**',
-            f'Status: **{"aktiv" if bool(settings.get("glitzerchipEnabled", True)) else "deaktiviert"}**',
-            f'Währung: **{settings.get("glitzerchipCurrencyName", "Glitzerchips")}**',
-            f'Gezählte Reward-Einträge: **{len(rewards)}** | bestätigte/emittierte Summe: **{compact_number(total_amount)}** | failed: **{failed}**'
-        ]
-        if target_id is not None:
-            profile = await api_get_profile(guild_id, target_id)
-            lines.append(f'Zielprofil <@{target_id}>: Level **{profile["level"]}**, XP **{compact_number(profile["total_xp"])}**, Rang **#{profile["rank"]}**')
-        lines.append('Letzte Einträge:')
-        if rewards[:5]:
-            for r in rewards[:5]:
-                lines.append(f'- L{r.get("level")} <@{r.get("user_id")}>: **{compact_number(int(r.get("amount", 0)))} {r.get("currency", "Glitzerchips")}** — `{r.get("status")}` — `{str(r.get("detail", ""))[:80]}`')
-        else:
-            lines.append('- Keine Einträge. Die Kasse schläft noch in Samt und Staub.')
-        await api.reply(ctx, '\n'.join(lines))
+        await api.reply(ctx, f'XP-Sand abgesaugt bei <@{target_id}>: **-{amount} XP**. Manual-XP darf negativ tanzen: **{_ensure_user(gs, target_id).get("manual_xp", 0)}**, Gesamt-XP: **{movement["new_xp"]}**.')
 
     @api.command({
         'names': ['importdb'],
@@ -1369,11 +1123,10 @@ async def setup_plugin(api):
             return
         guild_id = int(message.guild.id)
         user_id = int(author.id)
+        xp = calculate_message_xp(int(message.id))
         async with _STATE_LOCK:
             state = await _storage_get(api)
             gs = _ensure_guild(state, guild_id)
-            settings = _settings(gs)
-            xp = calculate_message_xp(int(message.id), int(settings.get('messageXpMin', _MESSAGE_XP_MIN)), int(settings.get('messageXpMax', _MESSAGE_XP_MAX)))
             mid = str(message.id)
             if mid in gs.setdefault('message_xp', {}):
                 return
@@ -1451,19 +1204,5 @@ async def setup_plugin(api):
 
     @api.on('level_manege.export_snapshot')
     async def export_snapshot(payload=None):
-        return await api_export_snapshot(payload)
-
-    @api.on('level_manege.get_profile')
-    async def on_get_profile(payload=None):
-        payload = payload or {}
-        return await api_get_profile(payload.get('guild_id'), payload.get('user_id'))
-
-    @api.on('level_manege.add_xp')
-    async def on_add_xp(payload=None):
-        payload = payload or {}
-        return await api_add_xp(payload.get('guild_id'), payload.get('user_id'), payload.get('amount'), payload.get('reason', 'bus-add-xp'), payload.get('actor_id', 0))
-
-    @api.on('level_manege.get_settings')
-    async def on_get_settings(payload=None):
-        payload = payload or {}
-        return await api_get_settings(payload.get('guild_id'))
+        state = await _storage_get(api)
+        return state

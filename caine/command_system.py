@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import inspect
@@ -19,6 +20,7 @@ from discord.ext import commands
 
 log = logging.getLogger(__name__)
 DEFAULT_KINGER_ROLE_ID = 1523734381146148864
+SLASH_SYNC_STATE_FILE = "slash_sync_state.json"
 
 
 class CommandLevel(str, Enum):
@@ -463,11 +465,18 @@ async def respond_to_interaction(
 
 async def sync_application_commands(bot: commands.Bot) -> None:
     guild_ids = slash_sync_guild_ids(bot)
+    signature = slash_command_sync_signature(bot)
+    if slash_sync_state_matches(bot, guild_ids, signature):
+        log.info("slash commands unchanged; skipping Discord sync")
+        return
+
     if guild_ids:
         guild_counts = await sync_guild_application_commands(bot, guild_ids)
         global_state = await clear_remote_global_commands(bot)
         if not guild_counts and global_state != "cleared":
             return
+        if len(guild_counts) == len(guild_ids) and global_state in {"cleared", "already-empty"}:
+            save_slash_sync_state(bot, guild_ids, signature, global_commands_cleared=True)
         log.info(
             "synced slash commands globally=%s guilds=%s",
             global_state,
@@ -480,6 +489,7 @@ async def sync_application_commands(bot: commands.Bot) -> None:
     except Exception as exc:
         log.warning("could not sync slash commands globally: %s", exc)
         return
+    save_slash_sync_state(bot, guild_ids, signature, global_commands_cleared=True)
     log.info("synced slash commands globally=%s guilds=none", len(synced))
 
 
@@ -499,6 +509,15 @@ async def sync_guild_application_commands(bot: commands.Bot, guild_ids: list[int
 
 async def clear_remote_global_commands(bot: commands.Bot) -> str:
     local_global_commands = list(bot.tree.get_commands(guild=None))
+    fetch_commands = getattr(bot.tree, "fetch_commands", None)
+    if callable(fetch_commands):
+        try:
+            remote_global_commands = await fetch_commands()
+            if not remote_global_commands:
+                return "already-empty"
+        except Exception as exc:
+            log.debug("could not inspect global slash commands before clearing: %s", exc)
+
     try:
         bot.tree.clear_commands(guild=None)
         await bot.tree.sync()
@@ -514,6 +533,106 @@ async def clear_remote_global_commands(bot: commands.Bot) -> str:
             except Exception:
                 log.debug("could not restore local slash command %s", command.name, exc_info=True)
     return "cleared"
+
+
+def slash_command_sync_signature(bot: commands.Bot) -> str:
+    payload = []
+    for command in sorted(bot.tree.get_commands(guild=None), key=lambda item: item.name):
+        extras = getattr(command, "extras", {}) or {}
+        spec = extras.get("caine_spec") if isinstance(extras, dict) else None
+        item = {
+            "name": str(getattr(command, "name", "")),
+            "description": str(getattr(command, "description", "")),
+            "plugin": extras.get("caine_plugin_name") if isinstance(extras, dict) else None,
+        }
+        if isinstance(spec, CommandSpec):
+            item["spec"] = {
+                "names": list(spec.names),
+                "description": spec.description,
+                "level": spec.level.value,
+                "group": spec.group,
+                "options": [
+                    {
+                        "name": option.name,
+                        "description": option.description,
+                        "type": option.type,
+                        "required": option.required,
+                    }
+                    for option in spec.options
+                ],
+            }
+        else:
+            item["parameters"] = [
+                {
+                    "name": str(getattr(parameter, "name", "")),
+                    "description": str(getattr(parameter, "description", "")),
+                    "type": str(getattr(getattr(parameter, "type", ""), "name", getattr(parameter, "type", ""))),
+                    "required": bool(getattr(parameter, "required", False)),
+                }
+                for parameter in getattr(command, "parameters", []) or []
+            ]
+        payload.append(item)
+
+    encoded = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def slash_sync_state_matches(bot: commands.Bot, guild_ids: list[int], signature: str) -> bool:
+    state = load_slash_sync_state(bot)
+    if not state:
+        return False
+    mode = "guild" if guild_ids else "global"
+    if state.get("mode") != mode:
+        return False
+    if state.get("guild_ids") != guild_ids:
+        return False
+    if state.get("signature") != signature:
+        return False
+    if guild_ids and not state.get("global_commands_cleared"):
+        return False
+    return True
+
+
+def load_slash_sync_state(bot: commands.Bot) -> dict[str, Any]:
+    path = slash_sync_state_path(bot)
+    if path is None or not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def save_slash_sync_state(
+    bot: commands.Bot,
+    guild_ids: list[int],
+    signature: str,
+    global_commands_cleared: bool,
+) -> None:
+    path = slash_sync_state_path(bot)
+    if path is None:
+        return
+    payload = {
+        "version": 1,
+        "mode": "guild" if guild_ids else "global",
+        "guild_ids": guild_ids,
+        "signature": signature,
+        "global_commands_cleared": global_commands_cleared,
+    }
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True), encoding="utf-8")
+    except OSError as exc:
+        log.debug("could not save slash sync state: %s", exc)
+
+
+def slash_sync_state_path(bot: commands.Bot) -> Path | None:
+    settings = getattr(bot, "settings", None)
+    data_dir = getattr(settings, "data_dir", None)
+    if data_dir is None:
+        return None
+    return Path(data_dir) / SLASH_SYNC_STATE_FILE
 
 
 def slash_sync_guild_ids(bot: commands.Bot) -> list[int]:

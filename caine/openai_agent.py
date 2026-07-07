@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import datetime as _dt
+import hashlib
 import json
+from pathlib import Path
 from textwrap import dedent
+from typing import Any
 
 from openai import OpenAI, OpenAIError
 from pydantic import BaseModel, Field
@@ -22,6 +26,18 @@ class PluginUpdateDraft(BaseModel):
     code: str = Field(description="Complete updated Python plugin code without markdown fences")
     change_summary: str = Field(description="What changed in this version")
     safety_notes: list[str] = Field(default_factory=list)
+
+
+class CommandRoute(BaseModel):
+    command_name: str = Field(default="", description="Existing command name to run, or empty string")
+    args: str = Field(default="", description="Arguments to pass to the command")
+    confidence: float = Field(default=0.0, description="0.0 to 1.0 confidence")
+    reason: str = Field(default="", description="Short routing reason")
+
+
+CHATGPT_ACTIVITY_LOG_FILE = "chatgpt_activity.jsonl"
+CHATGPT_ACTIVITY_LOG_DIR = "system_logs"
+CHATGPT_LOG_TEXT_LIMIT = 2400
 
 
 CAINE_INSPIRED_PLUGIN_BOT_INSTRUCTIONS = dedent(
@@ -394,11 +410,39 @@ PLUGIN_HIERARCHY_STANDARD = dedent(
 ).strip()
 
 
+class ChatGPTActivityLogger:
+    def __init__(self, path: str | Path | None) -> None:
+        self.path = Path(path) if path is not None else None
+
+    def write(self, event: str, status: str, payload: dict[str, Any] | None = None) -> None:
+        if self.path is None:
+            return
+        record = {
+            "timestamp_utc": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+            "event": event,
+            "status": status,
+            "payload": _sanitize_log_value(payload or {}),
+        }
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with self.path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+        except Exception:
+            return
+
+
 class OpenAIAgent:
-    def __init__(self, api_key: str, model: str, trusted_plugins: bool = False) -> None:
+    def __init__(
+        self,
+        api_key: str,
+        model: str,
+        trusted_plugins: bool = False,
+        activity_log_path: str | Path | None = None,
+    ) -> None:
         self.model = model
         self.trusted_plugins = trusted_plugins
         self.client = OpenAI(api_key=api_key)
+        self.activity_logger = ChatGPTActivityLogger(activity_log_path)
 
     async def answer(self, prompt: str, author_name: str) -> str:
         return await asyncio.to_thread(self._answer_sync, prompt, author_name)
@@ -424,22 +468,165 @@ class OpenAIAgent:
     async def health_check(self) -> str:
         return await asyncio.to_thread(self._health_check_sync)
 
-    def _answer_sync(self, prompt: str, author_name: str) -> str:
-        response = self.client.responses.create(
-            model=self.model,
-            instructions=_instruction_block(
-                CAINE_INSPIRED_PLUGIN_BOT_INSTRUCTIONS,
-                """
-                You are C.A.I.N.E., a helpful Discord bot.
-                Answer in the same language as the user unless they ask otherwise.
-                Keep Discord responses concise and practical.
-                For non-plugin questions, stay useful and do not force a plugin
-                proposal.
-                """,
-            ),
-            input=f"{author_name}: {prompt}",
+    async def select_command_for_message(
+        self,
+        message_text: str,
+        cleaned_request: str,
+        author_name: str,
+        command_catalog: list[dict[str, object]],
+        prefix: str,
+        replied_to_message_text: str = "",
+    ) -> CommandRoute:
+        return await asyncio.to_thread(
+            self._select_command_for_message_sync,
+            message_text,
+            cleaned_request,
+            author_name,
+            command_catalog,
+            prefix,
+            replied_to_message_text,
         )
-        return getattr(response, "output_text", "").strip() or "Ich habe keine Antwort erhalten."
+
+    def _answer_sync(self, prompt: str, author_name: str) -> str:
+        instructions = _instruction_block(
+            CAINE_INSPIRED_PLUGIN_BOT_INSTRUCTIONS,
+            """
+            You are C.A.I.N.E., a helpful Discord bot.
+            Answer in the same language as the user unless they ask otherwise.
+            Keep Discord responses concise and practical.
+            For non-plugin questions, stay useful and do not force a plugin
+            proposal.
+            """,
+        )
+        user_input = f"{author_name}: {prompt}"
+        self._log_activity(
+            "chatgpt.answer",
+            "request",
+            author_name=author_name,
+            input=_text_log_summary(user_input),
+            instructions=_text_log_summary(instructions),
+        )
+        try:
+            response = self.client.responses.create(
+                model=self.model,
+                instructions=instructions,
+                input=user_input,
+            )
+        except Exception as exc:
+            self._log_activity("chatgpt.answer", "error", author_name=author_name, error=_error_log_payload(exc))
+            raise
+        text = getattr(response, "output_text", "").strip() or "Ich habe keine Antwort erhalten."
+        self._log_activity("chatgpt.answer", "response", author_name=author_name, output=_text_log_summary(text))
+        return text
+
+    def _select_command_for_message_sync(
+        self,
+        message_text: str,
+        cleaned_request: str,
+        author_name: str,
+        command_catalog: list[dict[str, object]],
+        prefix: str,
+        replied_to_message_text: str = "",
+    ) -> CommandRoute:
+        command_catalog = command_catalog[:80]
+        instructions = _instruction_block(
+            CAINE_INSPIRED_PLUGIN_BOT_INSTRUCTIONS,
+            """
+            You are CAINE's command router for casual Discord messages.
+
+            Choose exactly one existing command from the supplied catalog, or
+            return an empty command_name when no command is appropriate.
+
+            Routing rules:
+            - Do not invent commands.
+            - Prefer "help" for questions like "was kann ich machen",
+              "hilfe", "befehle", "commands", or "what can you do".
+            - Prefer "ask" for general questions that are not clearly handled
+              by a more specific command.
+            - When the user replied to an earlier CAINE message, use that
+              replied-to message as context for the current request.
+            - For vague follow-ups like "was meinst du", "mach das", or
+              "erklaer das" in a reply, prefer "ask" and include enough of
+              the reply context in args for CAINE to answer coherently.
+            - For plugin-specific questions, choose "help" with the plugin name
+              as args when that is the safest answer.
+            - Only choose admin/kinger commands when the user clearly asks for
+              that exact administrative action or names the command.
+            - Never route destructive commands like approve, reject, reset,
+              remove, delete, import, recalculate from vague text.
+            - args must not include the command prefix or the command name.
+            - Keep args short and preserve user IDs, mentions, channel names,
+              numbers, and plugin names exactly when useful.
+            """,
+            """
+            Return a structured CommandRoute only. Use canonical command names
+            from the catalog, not aliases.
+            """,
+        )
+        user_input = dedent(
+            f"""
+            Author: {author_name}
+            Prefix: {prefix}
+            Original message: {message_text}
+            Message with CAINE trigger removed: {cleaned_request}
+            Replied-to CAINE message: {replied_to_message_text or "(none)"}
+
+            Available commands:
+            {json.dumps(command_catalog, ensure_ascii=True, indent=2)}
+            """
+        ).strip()
+        self._log_activity(
+            "chatgpt.command_router",
+            "request",
+            author_name=author_name,
+            original_message=_text_log_summary(message_text),
+            cleaned_request=_text_log_summary(cleaned_request),
+            replied_to_message=_text_log_summary(replied_to_message_text),
+            command_count=len(command_catalog),
+            commands=[item.get("name") for item in command_catalog],
+        )
+
+        parse = getattr(self.client.responses, "parse", None)
+        if parse is not None:
+            try:
+                response = parse(
+                    model=self.model,
+                    instructions=instructions,
+                    input=user_input,
+                    text_format=CommandRoute,
+                )
+                route = getattr(response, "output_parsed", None)
+                if isinstance(route, CommandRoute):
+                    clean_route = _clean_command_route(route, command_catalog)
+                    self._log_activity(
+                        "chatgpt.command_router",
+                        "response",
+                        method="parse",
+                        route=clean_route.model_dump(),
+                    )
+                    return clean_route
+            except TypeError:
+                pass
+            except Exception as exc:
+                self._log_activity("chatgpt.command_router", "error", method="parse", error=_error_log_payload(exc))
+                raise
+
+        try:
+            response = self.client.responses.create(
+                model=self.model,
+                instructions=(
+                    instructions
+                    + "\nReturn valid JSON with keys command_name, args, confidence, reason."
+                ),
+                input=user_input,
+            )
+            payload = json.loads(getattr(response, "output_text", "{}"))
+            clean_route = _clean_command_route(CommandRoute.model_validate(payload), command_catalog)
+        except Exception as exc:
+            self._log_activity("chatgpt.command_router", "error", method="json", error=_error_log_payload(exc))
+            raise
+        self._log_activity("chatgpt.command_router", "response", method="json", route=clean_route.model_dump())
+        return clean_route
 
     def _create_plugin_sync(self, request: str, author_name: str) -> PluginDraft:
         instructions = self._plugin_generation_instructions()
@@ -450,6 +637,13 @@ class OpenAIAgent:
             Feature request: {request}
             """
         ).strip()
+        self._log_activity(
+            "chatgpt.create_plugin",
+            "request",
+            author_name=author_name,
+            feature_request=_text_log_summary(request),
+            trusted_plugins=self.trusted_plugins,
+        )
 
         parse = getattr(self.client.responses, "parse", None)
         if parse is not None:
@@ -463,21 +657,35 @@ class OpenAIAgent:
                 draft = getattr(response, "output_parsed", None)
                 if isinstance(draft, PluginDraft):
                     draft.code = _clean_code_block(draft.code)
+                    self._log_activity(
+                        "chatgpt.create_plugin",
+                        "response",
+                        method="parse",
+                        draft=_plugin_draft_log_payload(draft),
+                    )
                     return draft
             except TypeError:
                 pass
+            except Exception as exc:
+                self._log_activity("chatgpt.create_plugin", "error", method="parse", error=_error_log_payload(exc))
+                raise
 
-        response = self.client.responses.create(
-            model=self.model,
-            instructions=(
-                instructions
-                + "\nReturn valid JSON with keys name, description, command_name, code, safety_notes."
-            ),
-            input=user_input,
-        )
-        payload = json.loads(getattr(response, "output_text", "{}"))
-        draft = PluginDraft.model_validate(payload)
-        draft.code = _clean_code_block(draft.code)
+        try:
+            response = self.client.responses.create(
+                model=self.model,
+                instructions=(
+                    instructions
+                    + "\nReturn valid JSON with keys name, description, command_name, code, safety_notes."
+                ),
+                input=user_input,
+            )
+            payload = json.loads(getattr(response, "output_text", "{}"))
+            draft = PluginDraft.model_validate(payload)
+            draft.code = _clean_code_block(draft.code)
+        except Exception as exc:
+            self._log_activity("chatgpt.create_plugin", "error", method="json", error=_error_log_payload(exc))
+            raise
+        self._log_activity("chatgpt.create_plugin", "response", method="json", draft=_plugin_draft_log_payload(draft))
         return draft
 
     def _update_plugin_sync(
@@ -502,6 +710,15 @@ class OpenAIAgent:
             ```
             """
         ).strip()
+        self._log_activity(
+            "chatgpt.update_plugin",
+            "request",
+            author_name=author_name,
+            plugin_name=plugin_name,
+            change_request=_text_log_summary(request),
+            current_source=_text_log_summary(current_source),
+            trusted_plugins=self.trusted_plugins,
+        )
 
         parse = getattr(self.client.responses, "parse", None)
         if parse is not None:
@@ -515,21 +732,40 @@ class OpenAIAgent:
                 draft = getattr(response, "output_parsed", None)
                 if isinstance(draft, PluginUpdateDraft):
                     draft.code = _clean_code_block(draft.code)
+                    self._log_activity(
+                        "chatgpt.update_plugin",
+                        "response",
+                        method="parse",
+                        draft=_plugin_update_draft_log_payload(draft),
+                    )
                     return draft
             except TypeError:
                 pass
+            except Exception as exc:
+                self._log_activity("chatgpt.update_plugin", "error", method="parse", error=_error_log_payload(exc))
+                raise
 
-        response = self.client.responses.create(
-            model=self.model,
-            instructions=(
-                instructions
-                + "\nReturn valid JSON with keys name, description, code, change_summary, safety_notes."
-            ),
-            input=user_input,
+        try:
+            response = self.client.responses.create(
+                model=self.model,
+                instructions=(
+                    instructions
+                    + "\nReturn valid JSON with keys name, description, code, change_summary, safety_notes."
+                ),
+                input=user_input,
+            )
+            payload = json.loads(getattr(response, "output_text", "{}"))
+            draft = PluginUpdateDraft.model_validate(payload)
+            draft.code = _clean_code_block(draft.code)
+        except Exception as exc:
+            self._log_activity("chatgpt.update_plugin", "error", method="json", error=_error_log_payload(exc))
+            raise
+        self._log_activity(
+            "chatgpt.update_plugin",
+            "response",
+            method="json",
+            draft=_plugin_update_draft_log_payload(draft),
         )
-        payload = json.loads(getattr(response, "output_text", "{}"))
-        draft = PluginUpdateDraft.model_validate(payload)
-        draft.code = _clean_code_block(draft.code)
         return draft
 
     def _plugin_generation_instructions(self) -> str:
@@ -678,6 +914,7 @@ class OpenAIAgent:
         )
 
     def _health_check_sync(self) -> str:
+        self._log_activity("chatgpt.health_check", "request")
         try:
             response = self.client.responses.create(
                 model=self.model,
@@ -685,9 +922,25 @@ class OpenAIAgent:
                 input="Health check",
             )
         except OpenAIError as exc:
+            self._log_activity("chatgpt.health_check", "error", error=_error_log_payload(exc))
             return f"OpenAI Fehler: {exc.__class__.__name__}: {str(exc)[:500]}"
         text = getattr(response, "output_text", "").strip()
-        return text or "OpenAI erreichbar, aber ohne Textantwort."
+        result = text or "OpenAI erreichbar, aber ohne Textantwort."
+        self._log_activity("chatgpt.health_check", "response", output=_text_log_summary(result))
+        return result
+
+    def _log_activity(self, event: str, status: str, **payload: Any) -> None:
+        logger = getattr(self, "activity_logger", None)
+        if not isinstance(logger, ChatGPTActivityLogger):
+            return
+        logger.write(
+            event,
+            status,
+            {
+                "model": getattr(self, "model", ""),
+                **payload,
+            },
+        )
 
 
 def _clean_code_block(value: str) -> str:
@@ -701,6 +954,167 @@ def _clean_code_block(value: str) -> str:
     if lines and lines[-1].strip().startswith("```"):
         lines = lines[:-1]
     return "\n".join(lines).strip() + "\n"
+
+
+def chatgpt_activity_log_path(data_dir: str | Path) -> Path:
+    return Path(data_dir) / CHATGPT_ACTIVITY_LOG_DIR / CHATGPT_ACTIVITY_LOG_FILE
+
+
+def read_chatgpt_activity_log(path: str | Path, limit: int = 10) -> list[dict[str, Any]]:
+    log_path = Path(path)
+    if not log_path.exists():
+        return []
+    try:
+        lines = log_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    entries: list[dict[str, Any]] = []
+    for line in reversed(lines):
+        if len(entries) >= max(1, int(limit)):
+            break
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            entries.append(payload)
+    entries.reverse()
+    return entries
+
+
+def summarize_chatgpt_activity_entry(entry: dict[str, Any]) -> str:
+    payload = entry.get("payload") if isinstance(entry.get("payload"), dict) else {}
+    timestamp = str(entry.get("timestamp_utc", ""))[:19].replace("T", " ")
+    event = str(entry.get("event", "chatgpt"))
+    status = str(entry.get("status", ""))
+    model = str(payload.get("model", ""))
+    bits = [f"`{timestamp}`", f"`{event}`", f"`{status}`"]
+    if model:
+        bits.append(f"`{model}`")
+
+    details = []
+    if "author_name" in payload:
+        details.append(f"Autor: {payload.get('author_name')}")
+    if "plugin_name" in payload:
+        details.append(f"Plugin: {payload.get('plugin_name')}")
+    route = payload.get("route")
+    if isinstance(route, dict):
+        details.append(f"Route: {route.get('command_name') or '-'} ({route.get('confidence')})")
+    draft = payload.get("draft")
+    if isinstance(draft, dict):
+        details.append(f"Draft: {draft.get('name') or '-'}")
+    error = payload.get("error")
+    if isinstance(error, dict):
+        details.append(f"Fehler: {error.get('type')}: {error.get('message')}")
+
+    suffix = f" - {' | '.join(details)}" if details else ""
+    return " ".join(bits) + suffix
+
+
+def _text_log_summary(value: Any, limit: int = CHATGPT_LOG_TEXT_LIMIT) -> dict[str, Any]:
+    text = "" if value is None else str(value)
+    return {
+        "length": len(text),
+        "sha256": _sha256_text(text),
+        "excerpt": _sanitize_log_text(text[:limit]),
+        "truncated": len(text) > limit,
+    }
+
+
+def _plugin_draft_log_payload(draft: PluginDraft) -> dict[str, Any]:
+    return {
+        "name": draft.name,
+        "description": draft.description,
+        "command_name": draft.command_name,
+        "code": _text_log_summary(draft.code, limit=1200),
+        "safety_notes": draft.safety_notes,
+    }
+
+
+def _plugin_update_draft_log_payload(draft: PluginUpdateDraft) -> dict[str, Any]:
+    return {
+        "name": draft.name,
+        "description": draft.description,
+        "change_summary": draft.change_summary,
+        "code": _text_log_summary(draft.code, limit=1200),
+        "safety_notes": draft.safety_notes,
+    }
+
+
+def _error_log_payload(exc: Exception) -> dict[str, str]:
+    return {
+        "type": exc.__class__.__name__,
+        "message": _sanitize_log_text(str(exc)[:1000]),
+    }
+
+
+def _sanitize_log_value(value: Any) -> Any:
+    if isinstance(value, str):
+        return _sanitize_log_text(value)
+    if isinstance(value, dict):
+        return {str(key): _sanitize_log_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_log_value(item) for item in value]
+    if isinstance(value, tuple):
+        return [_sanitize_log_value(item) for item in value]
+    return value
+
+
+def _sanitize_log_text(value: str) -> str:
+    text = str(value)
+    text = re_sub_secret(r"sk-[A-Za-z0-9_-]{12,}", text)
+    text = re_sub_secret(r"(?i)(discord[_-]?token\s*[:=]\s*)[^\s`'\";]+", text, keep_prefix=True)
+    text = re_sub_secret(r"(?i)(openai[_-]?api[_-]?key\s*[:=]\s*)[^\s`'\";]+", text, keep_prefix=True)
+    text = re_sub_secret(r"[A-Za-z0-9_-]{24}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{20,}", text)
+    return text
+
+
+def re_sub_secret(pattern: str, text: str, keep_prefix: bool = False) -> str:
+    import re
+
+    def replace(match: re.Match[str]) -> str:
+        if keep_prefix and match.groups():
+            return f"{match.group(1)}[REDACTED]"
+        return "[REDACTED]"
+
+    return re.sub(pattern, replace, text)
+
+
+def _sha256_text(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8", errors="replace")).hexdigest()
+
+
+def _clean_command_route(route: CommandRoute, command_catalog: list[dict[str, object]]) -> CommandRoute:
+    alias_to_name: dict[str, str] = {}
+    for command in command_catalog:
+        name = str(command.get("name", "")).strip().lower()
+        if not name:
+            continue
+        alias_to_name[name] = name
+        aliases = command.get("aliases", [])
+        if isinstance(aliases, list):
+            for alias in aliases:
+                clean_alias = str(alias).strip().lower()
+                if clean_alias:
+                    alias_to_name[clean_alias] = name
+
+    command_name = alias_to_name.get(str(route.command_name or "").strip().lower(), "")
+    args = str(route.args or "").strip()
+    if args.startswith("!"):
+        args = args[1:].strip()
+        first, rest = args.split(maxsplit=1) if " " in args else (args, "")
+        if first.lower() in alias_to_name:
+            args = rest.strip()
+    try:
+        confidence = max(0.0, min(1.0, float(route.confidence)))
+    except Exception:
+        confidence = 0.0
+    return CommandRoute(
+        command_name=command_name,
+        args=args[:500],
+        confidence=confidence,
+        reason=str(route.reason or "")[:240],
+    )
 
 
 def _instruction_block(*sections: str) -> str:

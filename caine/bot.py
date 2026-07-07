@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 
 import discord
@@ -18,7 +19,13 @@ from caine.command_system import (
     user_has_any_role,
 )
 from caine.config import Settings, load_settings
-from caine.openai_agent import OpenAIAgent
+from caine.openai_agent import (
+    CommandRoute,
+    OpenAIAgent,
+    chatgpt_activity_log_path,
+    read_chatgpt_activity_log,
+    summarize_chatgpt_activity_entry,
+)
 from caine.plugin_manager import PluginManager, slugify
 from caine.plugin_validation import PluginValidationError
 
@@ -48,6 +55,34 @@ TEXT_ATTACHMENT_CONTENT_TYPES = {
     "application/x-yaml",
     "application/yaml",
 }
+CAINE_TRIGGER_SPELLINGS = (
+    "caine",
+    "c.a.i.n.e",
+    "c-a-i-n-e",
+    "c a i n e",
+    "caine bot",
+    "caine-bot",
+)
+CAINE_ROUTE_FILLER_WORDS = {
+    "hey",
+    "hi",
+    "hallo",
+    "servus",
+    "bitte",
+    "mal",
+    "kurz",
+}
+CAINE_HELP_HINTS = (
+    "was kann ich machen",
+    "was kann ich tun",
+    "was kannst du",
+    "was geht",
+    "hilfe",
+    "help",
+    "commands",
+    "befehle",
+    "commandliste",
+)
 
 
 class AttachmentInputError(ValueError):
@@ -114,6 +149,13 @@ CORE_COMMANDS = {
         (CommandOption("plugin_id", "Pending plugin ID.", "string", True),),
     ),
     "reload_plugins": CommandSpec(("reload_plugins",), "Reloads approved plugins.", CommandLevel.ADMIN, "Plugin Lab"),
+    "chatgpt_logs": CommandSpec(
+        ("chatgpt-logs", "ai-logs"),
+        "Shows recent ChatGPT activity audit logs.",
+        CommandLevel.KINGER,
+        "System",
+        (CommandOption("limit", "Number of recent entries.", "integer", False),),
+    ),
     "health": CommandSpec(("health",), "Checks CAINE runtime state.", CommandLevel.KINGER, "System"),
 }
 
@@ -142,7 +184,12 @@ class CaineBot(commands.Bot):
         )
         self.settings = settings
         self.agent = (
-            OpenAIAgent(settings.openai_api_key, settings.openai_model, settings.trusted_plugins)
+            OpenAIAgent(
+                settings.openai_api_key,
+                settings.openai_model,
+                settings.trusted_plugins,
+                chatgpt_activity_log_path(settings.data_dir),
+            )
             if settings.openai_enabled
             else None
         )
@@ -160,7 +207,6 @@ class CaineBot(commands.Bot):
         if self.settings.plugin_autoload:
             loaded = await self.plugins.load_all_approved()
             log.info("loaded %s approved plugins", len(loaded))
-        await sync_application_commands(self)
 
     async def on_ready(self) -> None:
         guilds = ", ".join(guild.name for guild in self.guilds) or "no guilds"
@@ -185,6 +231,18 @@ class CaineBot(commands.Bot):
             return
         log.exception("command error", exc_info=error)
         await ctx.reply(f"Fehler: `{str(error)[:400]}`", mention_author=False)
+
+    async def on_message(self, message: discord.Message) -> None:
+        author = getattr(message, "author", None)
+        if author is None or getattr(author, "bot", False):
+            return
+
+        ctx = await self.get_context(message)
+        if ctx.valid:
+            await self.invoke(ctx)
+            return
+
+        await route_caine_mention_to_command(self, message)
 
 
 def install_commands(bot: CaineBot) -> None:
@@ -417,6 +475,21 @@ def install_commands(bot: CaineBot) -> None:
             lines.append(f"- OpenAI Ping: `{result[:300]}`")
         await ctx.reply("\n".join(lines), mention_author=False)
 
+    async def chatgpt_logs(ctx: commands.Context, args: str = "") -> None:
+        path = chatgpt_activity_log_path(bot.settings.data_dir)
+        limit = parse_log_limit(args, default=10, minimum=1, maximum=25)
+        entries = read_chatgpt_activity_log(path, limit)
+        if not entries:
+            await ctx.reply(f"Keine ChatGPT-Logs gefunden. Datei: `{relative(path, bot.settings.project_root)}`", mention_author=False)
+            return
+        lines = [
+            "ChatGPT System-Logs:",
+            f"Datei: `{relative(path, bot.settings.project_root)}`",
+            "",
+        ]
+        lines.extend(f"- {summarize_chatgpt_activity_entry(entry)}" for entry in entries)
+        await send_long(ctx, "\n".join(lines))
+
     handlers = {
         "help": caine_help,
         "ask": ask,
@@ -428,6 +501,7 @@ def install_commands(bot: CaineBot) -> None:
         "approve": approve,
         "reject": reject,
         "reload_plugins": reload_plugins,
+        "chatgpt_logs": chatgpt_logs,
         "health": health,
     }
     for command_name, handler in handlers.items():
@@ -524,6 +598,197 @@ async def command_visible_to_user(
     spec = getattr(command, "caine_spec", None)
     level = getattr(spec, "level", CommandLevel.USER)
     return await has_command_access(bot, user, level)
+
+
+async def route_caine_mention_to_command(bot: commands.Bot, message: discord.Message) -> bool:
+    content = str(getattr(message, "content", "") or "")
+    replied_caine_message = await resolve_replied_caine_message_content(bot, message)
+    if not content_mentions_caine(content, getattr(bot, "user", None)) and not replied_caine_message:
+        return False
+
+    command_catalog = await build_command_routing_catalog(bot, getattr(message, "author", None))
+    if not command_catalog:
+        return False
+
+    cleaned_request = strip_caine_triggers(content, getattr(bot, "user", None))
+    route = local_caine_command_route(cleaned_request, command_catalog)
+    if route is None:
+        agent = getattr(bot, "agent", None)
+        if agent is None:
+            return False
+        try:
+            typing = getattr(getattr(message, "channel", None), "typing", None)
+            if callable(typing):
+                async with typing():
+                    route = await agent.select_command_for_message(
+                        content,
+                        cleaned_request,
+                        str(getattr(message.author, "display_name", getattr(message.author, "name", "User"))),
+                        command_catalog,
+                        bot_command_prefix(bot),
+                        replied_caine_message,
+                    )
+            else:
+                route = await agent.select_command_for_message(
+                    content,
+                    cleaned_request,
+                    str(getattr(message.author, "display_name", getattr(message.author, "name", "User"))),
+                    command_catalog,
+                    bot_command_prefix(bot),
+                    replied_caine_message,
+                )
+        except OpenAIError as exc:
+            log.warning("could not route CAINE mention through OpenAI: %s", exc)
+            return False
+        except Exception as exc:
+            log.warning("could not route CAINE mention: %s", exc)
+            return False
+
+    if route is None or not route.command_name or route.confidence < 0.35:
+        return False
+
+    command = bot.get_command(route.command_name)
+    if command is None or not await command_visible_to_user(bot, command, getattr(message, "author", None)):
+        return False
+
+    ctx = await bot.get_context(message)
+    try:
+        await ctx.invoke(command, args=route.args)
+        return True
+    except commands.CommandError as exc:
+        await bot.on_command_error(ctx, exc)
+    except Exception as exc:
+        log.exception("routed CAINE command failed", exc_info=exc)
+        channel = getattr(message, "channel", None)
+        if channel is not None and hasattr(channel, "send"):
+            await channel.send(f"Fehler beim Ausfuehren von `{bot_command_prefix(bot)}{command.name}`.")
+    return False
+
+
+async def resolve_replied_caine_message_content(bot: commands.Bot, message: discord.Message) -> str:
+    reference = getattr(message, "reference", None)
+    if reference is None:
+        return ""
+
+    replied_message = getattr(reference, "resolved", None) or getattr(reference, "cached_message", None)
+    if replied_message is None:
+        message_id = getattr(reference, "message_id", None)
+        channel = getattr(message, "channel", None)
+        if message_id is not None and channel is not None and hasattr(channel, "fetch_message"):
+            try:
+                replied_message = await channel.fetch_message(message_id)
+            except (discord.Forbidden, discord.HTTPException, discord.NotFound) as exc:
+                log.debug("could not fetch replied CAINE message: %s", exc)
+                return ""
+            except Exception as exc:
+                log.debug("could not resolve replied CAINE message: %s", exc)
+                return ""
+
+    if not _same_discord_user(getattr(replied_message, "author", None), getattr(bot, "user", None)):
+        return ""
+    return str(getattr(replied_message, "content", "") or "").strip()
+
+
+async def build_command_routing_catalog(
+    bot: commands.Bot,
+    user: discord.abc.User | None,
+) -> list[dict[str, object]]:
+    prefix = bot_command_prefix(bot)
+    result = []
+    for command in sorted(bot.commands, key=lambda item: item.name):
+        if command.hidden or not await command_visible_to_user(bot, command, user):
+            continue
+        spec = getattr(command, "caine_spec", None)
+        result.append(
+            {
+                "name": command.name,
+                "aliases": list(command.aliases or []),
+                "description": getattr(spec, "description", None) or command.help or command.short_doc or "",
+                "level": command_level_label(getattr(spec, "level", CommandLevel.USER)),
+                "usage": f"{prefix}{command.name}",
+                "plugin": getattr(command, "caine_plugin_name", None) or "core",
+            }
+        )
+    return result
+
+
+def content_mentions_caine(content: str, bot_user: discord.abc.User | None = None) -> bool:
+    if not content:
+        return False
+    if bot_user is not None:
+        bot_id = getattr(bot_user, "id", None)
+        if bot_id is not None and (f"<@{bot_id}>" in content or f"<@!{bot_id}>" in content):
+            return True
+    return any(_contains_caine_spelling(content, spelling) for spelling in CAINE_TRIGGER_SPELLINGS)
+
+
+def strip_caine_triggers(content: str, bot_user: discord.abc.User | None = None) -> str:
+    cleaned = str(content or "")
+    if bot_user is not None:
+        bot_id = getattr(bot_user, "id", None)
+        if bot_id is not None:
+            cleaned = cleaned.replace(f"<@{bot_id}>", " ").replace(f"<@!{bot_id}>", " ")
+    for spelling in CAINE_TRIGGER_SPELLINGS:
+        cleaned = _caine_spelling_pattern(spelling).sub(" ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" ,:;.!?")
+    return cleaned.strip()
+
+
+def local_caine_command_route(
+    cleaned_request: str,
+    command_catalog: list[dict[str, object]],
+) -> CommandRoute | None:
+    alias_to_name: dict[str, str] = {}
+    for command in command_catalog:
+        name = str(command.get("name", "")).lower()
+        if not name:
+            continue
+        alias_to_name[name] = name
+        aliases = command.get("aliases", [])
+        if isinstance(aliases, list):
+            for alias in aliases:
+                alias_to_name[str(alias).lower()] = name
+
+    raw_tokens = cleaned_request.split()
+    token_index = 0
+    while token_index < len(raw_tokens):
+        normalized_token = raw_tokens[token_index].strip(" ,:;.!?").lower()
+        if normalized_token not in CAINE_ROUTE_FILLER_WORDS:
+            break
+        token_index += 1
+    if token_index < len(raw_tokens):
+        command_name = alias_to_name.get(raw_tokens[token_index].strip(" ,:;.!?").lower())
+        if command_name:
+            return CommandRoute(
+                command_name=command_name,
+                args=" ".join(raw_tokens[token_index + 1:]).strip(),
+                confidence=1.0,
+                reason="direct command",
+            )
+
+    normalized = cleaned_request.casefold()
+    if any(hint in normalized for hint in CAINE_HELP_HINTS) and "help" in alias_to_name:
+        return CommandRoute(command_name="help", args="", confidence=0.95, reason="help question")
+    return None
+
+
+def _contains_caine_spelling(content: str, spelling: str) -> bool:
+    return bool(_caine_spelling_pattern(spelling).search(content))
+
+
+def _caine_spelling_pattern(spelling: str) -> re.Pattern[str]:
+    escaped = re.escape(spelling.casefold()).replace(r"\ ", r"\s+")
+    return re.compile(rf"(?<![a-z0-9]){escaped}(?![a-z0-9])", re.IGNORECASE)
+
+
+def _same_discord_user(left: discord.abc.User | None, right: discord.abc.User | None) -> bool:
+    if left is None or right is None:
+        return False
+    left_id = getattr(left, "id", None)
+    right_id = getattr(right, "id", None)
+    if left_id is not None and right_id is not None:
+        return left_id == right_id
+    return left == right
 
 
 def can_view_level_labels(bot: commands.Bot, user: discord.abc.User | None) -> bool:
@@ -722,6 +987,14 @@ def code_block(source: str) -> str:
     shortened = source[:1600]
     suffix = "\n# ... gekuerzt" if len(source) > len(shortened) else ""
     return f"```python\n{shortened}{suffix}\n```"
+
+
+def parse_log_limit(args: str, default: int = 10, minimum: int = 1, maximum: int = 25) -> int:
+    try:
+        value = int(str(args or "").strip().split(maxsplit=1)[0])
+    except (IndexError, ValueError):
+        value = default
+    return max(minimum, min(maximum, value))
 
 
 def relative(path: Path, root: Path) -> str:

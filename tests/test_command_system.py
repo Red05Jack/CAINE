@@ -182,6 +182,98 @@ def test_slash_sync_with_guilds_clears_global_commands():
     assert [command.name for command in bot.tree.commands] == ["help"]
 
 
+def test_slash_sync_skips_unchanged_global_commands(tmp_path):
+    class FakeTree:
+        def __init__(self):
+            self.commands = [SimpleNamespace(name="help", description="Help", parameters=[], extras={})]
+            self.synced = []
+
+        def get_commands(self, guild=None):
+            return list(self.commands)
+
+        async def sync(self, guild=None):
+            self.synced.append(getattr(guild, "id", None))
+            return list(self.commands)
+
+    bot = SimpleNamespace(
+        settings=SimpleNamespace(allowed_guild_ids=set(), data_dir=tmp_path),
+        guilds=[],
+        tree=FakeTree(),
+    )
+
+    run(sync_application_commands(bot))
+    run(sync_application_commands(bot))
+
+    assert bot.tree.synced == [None]
+    assert (tmp_path / "slash_sync_state.json").exists()
+
+
+def test_slash_sync_runs_again_when_command_signature_changes(tmp_path):
+    class FakeTree:
+        def __init__(self):
+            self.commands = [SimpleNamespace(name="help", description="Help", parameters=[], extras={})]
+            self.synced = []
+
+        def get_commands(self, guild=None):
+            return list(self.commands)
+
+        async def sync(self, guild=None):
+            self.synced.append(getattr(guild, "id", None))
+            return list(self.commands)
+
+    bot = SimpleNamespace(
+        settings=SimpleNamespace(allowed_guild_ids=set(), data_dir=tmp_path),
+        guilds=[],
+        tree=FakeTree(),
+    )
+
+    run(sync_application_commands(bot))
+    bot.tree.commands.append(SimpleNamespace(name="plugins", description="Plugins", parameters=[], extras={}))
+    run(sync_application_commands(bot))
+
+    assert bot.tree.synced == [None, None]
+
+
+def test_slash_sync_cache_skips_repeated_guild_sync_and_global_clear(tmp_path):
+    class FakeTree:
+        def __init__(self):
+            self.commands = [SimpleNamespace(name="help", description="Help", parameters=[], extras={})]
+            self.copied_to = []
+            self.cleared = []
+            self.synced = []
+
+        def get_commands(self, guild=None):
+            return list(self.commands)
+
+        def copy_global_to(self, guild):
+            self.copied_to.append(guild.id)
+
+        def clear_commands(self, guild=None):
+            self.cleared.append(getattr(guild, "id", None))
+            if guild is None:
+                self.commands = []
+
+        def add_command(self, command):
+            self.commands.append(command)
+
+        async def sync(self, guild=None):
+            self.synced.append(getattr(guild, "id", None))
+            return [SimpleNamespace(name="help")]
+
+    bot = SimpleNamespace(
+        settings=SimpleNamespace(allowed_guild_ids={123}, data_dir=tmp_path),
+        guilds=[],
+        tree=FakeTree(),
+    )
+
+    run(sync_application_commands(bot))
+    run(sync_application_commands(bot))
+
+    assert bot.tree.copied_to == [123]
+    assert bot.tree.cleared == [None]
+    assert bot.tree.synced == [123, None]
+
+
 def test_command_access_levels():
     bot = FakeBot()
     kinger = FakeMember(roles=[FakeRole(1523734381146148864)])
