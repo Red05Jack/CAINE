@@ -29,6 +29,7 @@ from caine.openai_agent import (
 )
 from caine.plugin_manager import PluginManager, slugify
 from caine.plugin_validation import PluginValidationError
+from caine.storage import DiscordBackedPluginStorage
 
 
 log = logging.getLogger("caine")
@@ -270,6 +271,7 @@ class CaineBot(commands.Bot):
             if settings.openai_enabled
             else None
         )
+        self.plugin_storage = DiscordBackedPluginStorage(self, legacy_data_dir=settings.data_dir)
         self.plugins = PluginManager(
             bot=self,
             pending_dir=settings.pending_plugins_dir,
@@ -278,16 +280,21 @@ class CaineBot(commands.Bot):
             trusted_plugins=settings.trusted_plugins,
         )
         self._slash_synced_after_ready = False
+        self._runtime_loaded_after_ready = False
 
     async def setup_hook(self) -> None:
         self.plugins.ensure_dirs()
-        if self.settings.plugin_autoload:
-            loaded = await self.plugins.load_all_approved()
-            log.info("loaded %s approved plugins", len(loaded))
 
     async def on_ready(self) -> None:
         guilds = ", ".join(guild.name for guild in self.guilds) or "no guilds"
         log.info("logged in as %s (%s)", self.user, guilds)
+        if not self._runtime_loaded_after_ready:
+            self._runtime_loaded_after_ready = True
+            await self.plugin_storage.load()
+            log.info("plugin db loaded from %s", self.plugin_storage.last_loaded_source)
+            if self.settings.plugin_autoload:
+                loaded = await self.plugins.load_all_approved()
+                log.info("loaded %s approved plugins", len(loaded))
         if not self._slash_synced_after_ready:
             self._slash_synced_after_ready = True
             await sync_application_commands(self)
@@ -588,6 +595,7 @@ def install_commands(bot: CaineBot) -> None:
             f"- OpenAI Code Model: `{bot.settings.openai_code_model}`",
             f"- Geladene Plugins: {plugin_count}",
             f"- Trusted Plugins: `{bot.settings.trusted_plugins}`",
+            f"- Plugin DB: `{getattr(getattr(bot, 'plugin_storage', None), 'last_loaded_source', 'unbekannt')}`",
         ]
         if bot.agent is not None:
             async with ctx.typing():

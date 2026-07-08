@@ -949,7 +949,10 @@ class OpenAIAgent:
                 - Register Discord listeners with @api.event("message"),
                   @api.event("voice_state_update"), or any discord.py event name.
                 - Use await api.reply(ctx, "...") or await api.send(ctx, "...") for replies.
-                - Use await api.storage_get/set/delete for small persistent plugin state.
+                - Use await api.storage_get/set/delete for all persistent
+                  plugin state. CAINE keeps this state in memory and backs it
+                  up to Discord channel #bot-db as bot-db.json.
+                - Do not create local JSON/database files for plugin data.
                 - Plugins may access api.bot, api.manager, api.shared, api.data_dir,
                   and discord.py objects directly.
                 - Expose reusable Python helpers through api.shared["plugin_id.api"].
@@ -1017,7 +1020,10 @@ class OpenAIAgent:
               plugin details through !help <pluginname>.
             - Command handlers must be async def handler(ctx, args): ...
             - Send messages with await api.reply(ctx, "...") or await api.send(ctx, "...").
-            - Use await api.storage_get/set/delete for tiny persistent state.
+            - Use await api.storage_get/set/delete for all persistent plugin
+              state. CAINE keeps this state in memory and backs it up to
+              Discord channel #bot-db as bot-db.json.
+            - Do not create local JSON/database files for plugin data.
             - Use api.choice for random choices.
             - Expose a small Python-level API for other plugins through
               api.shared["plugin_id.api"] = {"function_name": function}.
@@ -1084,6 +1090,9 @@ class OpenAIAgent:
               audit/master commands, and a Python-level API for other plugins.
             - Keep async/sync behavior compatible with the current code.
             - If the plugin uses api.storage_get/set/delete, keep the await pattern.
+            - Persistent plugin data must stay in api.storage_get/set/delete;
+              do not add local JSON/database files. CAINE backs storage up to
+              Discord channel #bot-db as bot-db.json.
             - Slash commands are currently S3/user-only. Keep admin and kinger
               commands prefix-only; use "slash": false on user commands that
               should also stay prefix-only.

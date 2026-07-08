@@ -44,6 +44,19 @@ Slash-Commands werden entweder serverbezogen oder global synchronisiert. Wenn
 Guild-IDs bekannt sind, nutzt C.A.I.N.E. die schnelle serverbezogene Sync und
 raeumt alte globale Slash-Commands auf, damit Discord sie nicht doppelt zeigt.
 
+## Plugin-Datenbank
+
+Plugin-Daten laufen ueber `api.storage_get`, `api.storage_set` und
+`api.storage_delete`. C.A.I.N.E. haelt diese Daten zur Laufzeit im Python-
+Speicher und schreibt nach Aenderungen ein `bot-db.json` Backup in den Discord-
+Kanal `#bot-db`. Beim Bot-Start wird das neueste `bot-db.json` aus diesem Kanal
+eingelesen, bevor approved Plugins geladen werden.
+
+Wenn noch kein Discord-Backup existiert, importiert C.A.I.N.E. einmalig alte
+Plugin-JSON-Dateien aus `data/` und legt daraus das erste `#bot-db` Backup an.
+Neue Plugins sollen keine eigenen JSON-/Datenbankdateien schreiben, sondern
+immer die `api.storage_*` Methoden verwenden.
+
 Die Default-Kinger-Rolle steht in `command_permissions.json`:
 
 ```json

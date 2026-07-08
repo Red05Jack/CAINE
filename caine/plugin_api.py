@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import random
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -9,6 +8,7 @@ from typing import Any
 from discord.ext import commands
 
 from caine.command_system import build_prefix_command, command_spec
+from caine.storage import InMemoryPluginStorage
 
 
 PluginHandler = Callable[[commands.Context, str], Awaitable[None]]
@@ -27,6 +27,7 @@ class PluginAPI:
         emit: Callable[[str, str, Any], Awaitable[list[Any]]],
         manager: Any,
         shared: dict[str, Any],
+        storage: Any | None = None,
     ) -> None:
         self.bot = bot
         self.manager = manager
@@ -41,7 +42,7 @@ class PluginAPI:
         self._register_event = register_event
         self._subscribe = subscribe
         self._emit = emit
-        self._state_path = data_dir / f"{plugin_name}.json"
+        self._storage = storage or InMemoryPluginStorage()
 
     def command(
         self,
@@ -115,30 +116,10 @@ class PluginAPI:
         return random.choice(list(values))
 
     async def storage_get(self, key: str, default: Any = None) -> Any:
-        state = self._read_state()
-        return state.get(key, default)
+        return await self._storage.get(self._plugin_name, str(key), default)
 
     async def storage_set(self, key: str, value: Any) -> None:
-        state = self._read_state()
-        state[key] = value
-        self._write_state(state)
+        await self._storage.set(self._plugin_name, str(key), value)
 
     async def storage_delete(self, key: str) -> None:
-        state = self._read_state()
-        state.pop(key, None)
-        self._write_state(state)
-
-    def _read_state(self) -> dict[str, Any]:
-        if not self._state_path.exists():
-            return {}
-        try:
-            with self._state_path.open("r", encoding="utf-8") as handle:
-                value = json.load(handle)
-        except (OSError, json.JSONDecodeError):
-            return {}
-        return value if isinstance(value, dict) else {}
-
-    def _write_state(self, state: dict[str, Any]) -> None:
-        self._data_dir.mkdir(parents=True, exist_ok=True)
-        with self._state_path.open("w", encoding="utf-8") as handle:
-            json.dump(state, handle, indent=2, ensure_ascii=True)
+        await self._storage.delete(self._plugin_name, str(key))

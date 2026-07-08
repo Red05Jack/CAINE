@@ -22,6 +22,7 @@ from caine.plugin_validation import (
     normalize_plugin_command_source,
     validate_plugin_source,
 )
+from caine.storage import InMemoryPluginStorage
 
 
 log = logging.getLogger(__name__)
@@ -60,6 +61,7 @@ class PluginManager:
         self.archive_dir = approved_dir.parent / "archive"
         self.data_dir = data_dir
         self.trusted_plugins = trusted_plugins
+        self.storage = getattr(bot, "plugin_storage", None) or InMemoryPluginStorage()
         self.loaded: dict[str, LoadedPlugin] = {}
         self._plugin_commands: dict[str, list[str]] = {}
         self._plugin_owned_commands: dict[str, list[str]] = {}
@@ -285,6 +287,7 @@ class PluginManager:
             emit=self._emit,
             manager=self,
             shared=self.shared,
+            storage=self.storage,
         )
         try:
             result = setup_plugin(api)
