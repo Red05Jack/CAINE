@@ -51,6 +51,9 @@ class PluginAPI:
         level: str = "user",
         options: tuple[Any, ...] | list[Any] = (),
         slash: bool | None = None,
+        routing_priority: int | str = 50,
+        routing_when: str = "",
+        routing_not_when: str = "",
     ) -> Callable[[PluginHandler], PluginHandler]:
         def decorator(handler: PluginHandler) -> PluginHandler:
             spec = command_spec(
@@ -60,6 +63,9 @@ class PluginAPI:
                 level=level,
                 options=options,
                 slash_enabled=slash,
+                routing_priority=routing_priority,
+                routing_when=routing_when,
+                routing_not_when=routing_not_when,
             )
 
             async def callback(ctx: commands.Context, args: str = "") -> None:

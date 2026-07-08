@@ -127,6 +127,10 @@ Trage danach in `.env` mindestens `DISCORD_TOKEN` und `OPENAI_API_KEY` ein.
 Im Discord Developer Portal muss fuer den Bot das Message Content Intent
 aktiviert sein.
 
+OpenAI nutzt getrennte Modelle: `OPENAI_TEXT_MODEL` fuer `!ask`,
+`OPENAI_ROUTER_MODEL` fuer CAINE-Erwaehnungen in normalen Nachrichten und
+`OPENAI_CODE_MODEL` fuer Plugin-Erstellung/-Updates.
+
 Wichtig: echte Tokens gehoeren nur in `.env`, nicht in `.env.example`.
 
 ## Start

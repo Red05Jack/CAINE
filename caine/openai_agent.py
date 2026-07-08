@@ -457,9 +457,11 @@ class OpenAIAgent:
         trusted_plugins: bool = False,
         activity_log_path: str | Path | None = None,
         code_model: str | None = None,
+        router_model: str | None = None,
     ) -> None:
         self.text_model = text_model
         self.code_model = code_model or text_model
+        self.router_model = router_model or text_model
         self.model = self.code_model
         self.trusted_plugins = trusted_plugins
         self.client = OpenAI(api_key=api_key)
@@ -565,7 +567,7 @@ class OpenAIAgent:
         prefix: str,
         replied_to_message_text: str = "",
     ) -> CommandRoute:
-        model = self._text_model_name()
+        model = self._router_model_name()
         command_catalog = command_catalog[:80]
         instructions = _instruction_block(
             CAINE_INSPIRED_PLUGIN_BOT_INSTRUCTIONS,
@@ -577,10 +579,22 @@ class OpenAIAgent:
 
             Routing rules:
             - Do not invent commands.
-            - Prefer "help" for questions like "was kann ich machen",
-              "hilfe", "befehle", "commands", or "what can you do".
+            - Read each command's routing.priority, routing.use_when,
+              routing.avoid_when, and options before choosing.
+            - Choose a command only when the message matches routing.use_when
+              and does not match routing.avoid_when.
+            - When two commands fit equally well, prefer the higher
+              routing.priority. Specific commands still beat broad fallback
+              commands when their required intent and arguments are present.
+            - Prefer "ask" for broad or vague help/capability questions like
+              "was kann ich machen", "hilfe", "was kannst du", or "what can
+              you do", because CAINE should answer naturally instead of dumping
+              command help.
             - Prefer "ask" for general questions that are not clearly handled
               by a more specific command.
+            - Use "help" only when the user explicitly asks for a command list,
+              command syntax, exact plugin commands, or details about a named
+              plugin.
             - When the user replied to an earlier CAINE message, use that
               replied-to message as context for the current request.
             - The available command catalog is already filtered by the user's
@@ -597,6 +611,7 @@ class OpenAIAgent:
             - Do not reject a command only because it is S2/S1 or changes state;
               if it appears in the catalog, permission is sufficient. Still
               require a concrete target or arguments from the message/context.
+            - Use options to understand which arguments are required or useful.
             - args must not include the command prefix or the command name.
             - Keep args short and preserve user IDs, mentions, channel names,
               numbers, and plugin names exactly when useful.
@@ -894,7 +909,12 @@ class OpenAIAgent:
                   "description": "...",
                   "level": "user",
                   "slash": true,
-                  "options": []
+                  "options": [],
+                  "routing": {
+                    "priority": 50,
+                    "when": "Use when ...",
+                    "not_when": "Do not use when ..."
+                  }
                   }).
                 - Slash commands are generated only for S3/user commands for
                   now. Admin and kinger commands must stay prefix-only.
@@ -904,6 +924,13 @@ class OpenAIAgent:
                   Option objects are {"name": "...", "description": "...",
                   "type": "string|integer|number|boolean|user|channel|role|attachment",
                   "required": true|false}.
+                - Every command must include routing metadata. Use
+                  routing.priority from 0-100, where higher means more specific
+                  or safer to run when several commands match. routing.when
+                  must describe when to use the command. routing.not_when must
+                  describe confusing neighboring intents where another command,
+                  usually ask, help, or a more specific plugin command, should
+                  be used instead.
                 - Command levels are:
                   "kinger" for S1 Kinger-role-only commands,
                   "admin" for S2 Discord administrator commands,
@@ -948,7 +975,12 @@ class OpenAIAgent:
               "description": "...",
               "level": "user",
               "slash": true,
-              "options": []
+              "options": [],
+              "routing": {
+                "priority": 50,
+                "when": "Use when ...",
+                "not_when": "Do not use when ..."
+              }
               }).
             - Slash commands are generated only for S3/user commands for now.
               Admin and kinger commands must stay prefix-only. Use
@@ -961,6 +993,12 @@ class OpenAIAgent:
               Option objects are {"name": "...", "description": "...",
               "type": "string|integer|number|boolean|user|channel|role|attachment",
               "required": true|false}.
+            - Every command must include routing metadata. Use
+              routing.priority from 0-100, where higher means more specific or
+              safer to run when several commands match. routing.when must
+              describe when to use the command. routing.not_when must describe
+              confusing neighboring intents where another command, usually ask,
+              help, or a more specific plugin command, should be used instead.
             - Command levels are:
               "kinger" for S1 Kinger-role-only commands,
               "admin" for S2 Discord administrator commands,
@@ -1024,6 +1062,10 @@ class OpenAIAgent:
               block plus the new lines inserted.
             - Preserve the existing PLUGIN name unless the user explicitly asks to rename it.
             - Preserve existing commands and behavior unless the requested change requires edits.
+            - When adding or editing @api.command metadata, include or preserve
+              routing metadata: {{"priority": 0-100, "when": "...",
+              "not_when": "..."}}. Explain when to use the command, when not to
+              use it, and keep neighboring commands distinct.
             - When adding or reshaping behavior, apply the CAINE plugin hierarchy:
               S3 user commands, S2 admin moderation/config commands, S1 kinger
               audit/master commands, and a Python-level API for other plugins.
@@ -1069,6 +1111,9 @@ class OpenAIAgent:
 
     def _text_model_name(self) -> str:
         return getattr(self, "text_model", getattr(self, "model", ""))
+
+    def _router_model_name(self) -> str:
+        return getattr(self, "router_model", self._text_model_name())
 
     def _code_model_name(self) -> str:
         return getattr(self, "code_model", getattr(self, "model", self._text_model_name()))

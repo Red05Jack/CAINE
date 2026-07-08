@@ -75,6 +75,24 @@ def test_command_object_normalizes_names_and_options():
     assert [option.type for option in spec.options] == ["user", "string"]
 
 
+def test_command_object_normalizes_routing_metadata():
+    spec = command_spec(
+        {
+            "names": ["konto"],
+            "description": "Shows account.",
+            "routing": {
+                "priority": 120,
+                "when": "  Use for account balance.\n",
+                "not_when": "Do not use for general chat.",
+            },
+        }
+    )
+
+    assert spec.routing_priority == 100
+    assert spec.routing_when == "Use for account balance."
+    assert spec.routing_not_when == "Do not use for general chat."
+
+
 def test_command_object_parses_slash_enabled_flag():
     spec = command_spec(
         {

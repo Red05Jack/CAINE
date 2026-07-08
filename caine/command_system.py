@@ -21,6 +21,7 @@ from discord.ext import commands
 log = logging.getLogger(__name__)
 DEFAULT_KINGER_ROLE_ID = 1523734381146148864
 SLASH_SYNC_STATE_FILE = "slash_sync_state.json"
+DEFAULT_ROUTING_PRIORITY = 50
 
 
 class CommandLevel(str, Enum):
@@ -45,6 +46,9 @@ class CommandSpec:
     group: str = "Plugins"
     options: tuple[CommandOption, ...] = ()
     slash_enabled: bool | None = None
+    routing_priority: int = DEFAULT_ROUTING_PRIORITY
+    routing_when: str = ""
+    routing_not_when: str = ""
 
     @property
     def name(self) -> str:
@@ -66,6 +70,9 @@ def command_spec(
     group: str = "Plugins",
     options: tuple[CommandOption, ...] | list[CommandOption | dict[str, Any]] = (),
     slash_enabled: bool | None = None,
+    routing_priority: int | str = DEFAULT_ROUTING_PRIORITY,
+    routing_when: str = "",
+    routing_not_when: str = "",
 ) -> CommandSpec:
     if isinstance(name_or_object, CommandSpec):
         return name_or_object
@@ -80,6 +87,28 @@ def command_spec(
         level = name_or_object.get("level", level)
         group = str(name_or_object.get("group", group)).strip() or group
         options = name_or_object.get("options", options)
+        routing = name_or_object.get("routing", {})
+        if not isinstance(routing, dict):
+            routing = {}
+        routing_priority = name_or_object.get("routing_priority", routing.get("priority", routing_priority))
+        routing_when = str(
+            name_or_object.get(
+                "routing_when",
+                name_or_object.get("use_when", routing.get("when", routing.get("use_when", routing_when))),
+            )
+        )
+        routing_not_when = str(
+            name_or_object.get(
+                "routing_not_when",
+                name_or_object.get(
+                    "not_when",
+                    name_or_object.get(
+                        "avoid_when",
+                        routing.get("not_when", routing.get("avoid_when", routing_not_when)),
+                    ),
+                ),
+            )
+        )
         slash_enabled = normalize_slash_enabled(
             name_or_object.get("slash_enabled", name_or_object.get("slash", slash_enabled))
         )
@@ -98,6 +127,9 @@ def command_spec(
         group=group,
         options=normalize_command_options(options),
         slash_enabled=slash_enabled,
+        routing_priority=normalize_routing_priority(routing_priority),
+        routing_when=normalize_routing_text(routing_when),
+        routing_not_when=normalize_routing_text(routing_not_when),
     )
 
 
@@ -178,6 +210,18 @@ def normalize_slash_enabled(value: Any) -> bool | None:
     if normalized in {"0", "false", "no", "n", "off", "prefix", "prefix-only"}:
         return False
     return None
+
+
+def normalize_routing_priority(value: int | str) -> int:
+    try:
+        priority = int(value)
+    except (TypeError, ValueError):
+        priority = DEFAULT_ROUTING_PRIORITY
+    return max(0, min(100, priority))
+
+
+def normalize_routing_text(value: str) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip()[:300]
 
 
 def normalize_command_level(value: str | CommandLevel) -> CommandLevel:

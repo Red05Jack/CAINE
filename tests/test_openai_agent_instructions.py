@@ -16,6 +16,8 @@ def test_untrusted_plugin_generation_instructions_require_hierarchy_and_shared_a
     assert "S3 / Commands / Nutzer" in instructions
     assert "S2 / Admin commands / Moderation" in instructions
     assert "S1 / Kinger / Master" in instructions
+    assert '"routing": {' in instructions
+    assert "Every command must include routing metadata" in instructions
     assert 'api.shared["plugin_id.api"]' in instructions
     assert "Do not use @api.on(...) in untrusted plugins" in instructions
 
@@ -36,6 +38,7 @@ def test_trusted_plugin_generation_instructions_allow_bus_integrations():
     assert '@api.on("topic")' in instructions
     assert "await api.emit" in instructions
     assert '"slash": false' in instructions
+    assert "Every command must include routing metadata" in instructions
     assert "Admin and kinger commands must stay prefix-only" in instructions
 
 
@@ -47,6 +50,7 @@ def test_plugin_update_instructions_keep_hierarchy_contract():
     assert "S2 admin moderation/config commands" in instructions
     assert "S1 kinger" in instructions
     assert "Python-level API for other plugins" in instructions
+    assert "routing metadata" in instructions
     assert "Slash commands are currently S3/user-only" in instructions
     assert "Return only a minimal list of exact source replacements" in instructions
     assert "Do not return a complete replacement file" in instructions
@@ -82,4 +86,8 @@ def test_command_router_prompt_includes_replied_caine_message_context():
     assert "replied-to message as context" in responses.instructions
     assert "already filtered by the user's" in responses.instructions
     assert "including admin or kinger commands" in responses.instructions
+    assert "routing.priority" in responses.instructions
+    assert "routing.avoid_when" in responses.instructions
+    assert "Prefer \"ask\" for broad or vague help/capability questions" in responses.instructions
+    assert "Use \"help\" only when the user explicitly asks for a command list" in responses.instructions
     assert "Never route destructive commands" not in responses.instructions

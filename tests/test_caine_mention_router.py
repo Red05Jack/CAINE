@@ -182,3 +182,25 @@ def test_routing_catalog_only_contains_commands_visible_to_user():
     assert "help" in user_names
     assert "evolve" not in user_names
     assert "evolve" in admin_names
+
+
+def test_routing_catalog_includes_options_and_routing_hints():
+    bot = make_bot()
+
+    catalog = run(build_command_routing_catalog(bot, FakeMember()))
+    by_name = {item["name"]: item for item in catalog}
+
+    ask = by_name["ask"]
+    help_command = by_name["help"]
+    assert ask["options"] == [
+        {
+            "name": "prompt",
+            "description": "Question or prompt.",
+            "type": "string",
+            "required": True,
+        }
+    ]
+    assert ask["routing"]["priority"] == 80
+    assert "broad questions" in ask["routing"]["use_when"]
+    assert help_command["routing"]["priority"] == 35
+    assert "vague help" in help_command["routing"]["avoid_when"]

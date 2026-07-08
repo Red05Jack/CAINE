@@ -49,6 +49,7 @@ class Settings:
     discord_token: str
     openai_api_key: str
     openai_text_model: str
+    openai_router_model: str
     openai_code_model: str
     command_prefix: str
     allowed_guild_ids: set[int]
@@ -81,6 +82,7 @@ def load_settings() -> Settings:
         discord_token=_secret(os.getenv("DISCORD_TOKEN")),
         openai_api_key=_secret(os.getenv("OPENAI_API_KEY")),
         openai_text_model=os.getenv("OPENAI_TEXT_MODEL", os.getenv("OPENAI_CHEAP_MODEL", "gpt-5-nano")),
+        openai_router_model=os.getenv("OPENAI_ROUTER_MODEL", "gpt-5-mini"),
         openai_code_model=os.getenv("OPENAI_CODE_MODEL", os.getenv("OPENAI_MODEL", "gpt-5.5")),
         command_prefix=os.getenv("COMMAND_PREFIX", "!"),
         allowed_guild_ids=_csv_int(os.getenv("CAINE_ALLOWED_GUILD_IDS")),

@@ -77,6 +77,9 @@ CORE_COMMANDS = {
         CommandLevel.USER,
         "General",
         (CommandOption("topic", "Plugin name for detailed help.", "string", False),),
+        routing_priority=35,
+        routing_when="Use when the user explicitly asks for command syntax, a command list, or details for a named plugin.",
+        routing_not_when="Do not use for vague help, small talk, general questions, or capability questions; use ask instead.",
     ),
     "ask": CommandSpec(
         ("ask",),
@@ -84,8 +87,19 @@ CORE_COMMANDS = {
         CommandLevel.USER,
         "General",
         (CommandOption("prompt", "Question or prompt.", "string", True),),
+        routing_priority=80,
+        routing_when="Use for broad questions, small talk, vague requests, capability questions, or anything not clearly handled by a specific command.",
+        routing_not_when="Do not use when the user clearly asks for an exact bot command with enough required arguments.",
     ),
-    "plugins": CommandSpec(("plugins",), "Lists loaded plugins.", CommandLevel.USER, "General"),
+    "plugins": CommandSpec(
+        ("plugins",),
+        "Lists loaded plugins.",
+        CommandLevel.USER,
+        "General",
+        routing_priority=75,
+        routing_when="Use when the user asks which plugins are loaded, active, running, or available right now.",
+        routing_not_when="Do not use for detailed command help for one plugin; use help with the plugin name.",
+    ),
     "evolve": CommandSpec(
         ("evolve",),
         "Creates a pending plugin from a feature request.",
@@ -95,6 +109,9 @@ CORE_COMMANDS = {
             CommandOption("request", "Feature request text.", "string", False),
             CommandOption("file", "Optional text attachment.", "attachment", False),
         ),
+        routing_priority=90,
+        routing_when="Use when an admin asks CAINE to create a new plugin or new bot feature.",
+        routing_not_when="Do not use for normal chat, existing plugin changes, or feature questions without a create request.",
     ),
     "evolve_plugin": CommandSpec(
         ("evolve_plugin",),
@@ -106,14 +123,28 @@ CORE_COMMANDS = {
             CommandOption("request", "Change request text.", "string", False),
             CommandOption("file", "Optional text attachment.", "attachment", False),
         ),
+        routing_priority=90,
+        routing_when="Use when an admin asks to update, repair, extend, or change an existing plugin.",
+        routing_not_when="Do not use for creating a brand-new plugin; use evolve for that.",
     ),
-    "pending": CommandSpec(("pending",), "Lists pending plugin drafts.", CommandLevel.ADMIN, "Plugin Lab"),
+    "pending": CommandSpec(
+        ("pending",),
+        "Lists pending plugin drafts.",
+        CommandLevel.ADMIN,
+        "Plugin Lab",
+        routing_priority=70,
+        routing_when="Use when an admin asks what plugin drafts are waiting for review or approval.",
+        routing_not_when="Do not use to show source code for one draft; use review with the plugin id.",
+    ),
     "review": CommandSpec(
         ("review",),
         "Shows pending plugin source.",
         CommandLevel.ADMIN,
         "Plugin Lab",
         (CommandOption("plugin_id", "Pending plugin ID.", "string", True),),
+        routing_priority=80,
+        routing_when="Use when an admin asks to inspect or show the source of a specific pending plugin.",
+        routing_not_when="Do not use without a plugin id; use pending to list available drafts first.",
     ),
     "approve": CommandSpec(
         ("approve",),
@@ -121,6 +152,9 @@ CORE_COMMANDS = {
         CommandLevel.ADMIN,
         "Plugin Lab",
         (CommandOption("plugin_id", "Pending plugin ID.", "string", True),),
+        routing_priority=85,
+        routing_when="Use when an admin clearly wants to approve, activate, or load a specific pending plugin.",
+        routing_not_when="Do not use without an explicit plugin id or when the user only wants to review code.",
     ),
     "reject": CommandSpec(
         ("reject",),
@@ -128,16 +162,38 @@ CORE_COMMANDS = {
         CommandLevel.ADMIN,
         "Plugin Lab",
         (CommandOption("plugin_id", "Pending plugin ID.", "string", True),),
+        routing_priority=85,
+        routing_when="Use when an admin clearly wants to reject or delete a specific pending plugin draft.",
+        routing_not_when="Do not use without an explicit plugin id.",
     ),
-    "reload_plugins": CommandSpec(("reload_plugins",), "Reloads approved plugins.", CommandLevel.ADMIN, "Plugin Lab"),
+    "reload_plugins": CommandSpec(
+        ("reload_plugins",),
+        "Reloads approved plugins.",
+        CommandLevel.ADMIN,
+        "Plugin Lab",
+        routing_priority=70,
+        routing_when="Use when an admin asks to reload approved plugins from disk.",
+        routing_not_when="Do not use for approving pending plugins or listing loaded plugins.",
+    ),
     "chatgpt_logs": CommandSpec(
         ("chatgpt-logs", "ai-logs"),
         "Shows recent ChatGPT activity audit logs.",
         CommandLevel.KINGER,
         "System",
         (CommandOption("limit", "Number of recent entries.", "integer", False),),
+        routing_priority=70,
+        routing_when="Use when a kinger asks for recent ChatGPT, OpenAI, AI, or router activity logs.",
+        routing_not_when="Do not use for ordinary user questions about commands or plugins.",
     ),
-    "health": CommandSpec(("health",), "Checks CAINE runtime state.", CommandLevel.KINGER, "System"),
+    "health": CommandSpec(
+        ("health",),
+        "Checks CAINE runtime state.",
+        CommandLevel.KINGER,
+        "System",
+        routing_priority=70,
+        routing_when="Use when a kinger asks for CAINE runtime status, configured models, tokens-present status, or OpenAI ping.",
+        routing_not_when="Do not use for a casual 'how are you' question; use ask for that.",
+    ),
 }
 
 COMMAND_LEVEL_HELP_GROUPS = (
@@ -150,6 +206,44 @@ COMMAND_LEVEL_ORDER = {
     CommandLevel.USER: 0,
     CommandLevel.ADMIN: 1,
     CommandLevel.KINGER: 2,
+}
+
+ROUTING_HINT_OVERRIDES = {
+    "hello": {
+        "priority": 20,
+        "when": "Use only when the user explicitly wants to run the hello/greeting demo command.",
+        "not_when": "Do not use for small talk such as 'wie gehts' or 'wie geht es dir'; use ask.",
+    },
+    "konto": {
+        "priority": 80,
+        "when": "Use when the user asks for their Glitzerchip or economy account balance/status.",
+        "not_when": "Do not use for Discord account, OpenAI account, or vague account-management questions.",
+    },
+    "geld": {
+        "priority": 60,
+        "when": "Use when the user asks for the economy command overview covering account, daily, shop, games, transfers, or leaderboard.",
+        "not_when": "Do not use for a personal balance question; use konto for that.",
+    },
+    "level-money": {
+        "priority": 65,
+        "when": "Use when the user asks how level-ups and Glitzerchip rewards are connected.",
+        "not_when": "Do not use for personal rank cards, XP leaderboards, or economy balance.",
+    },
+    "level-money-info": {
+        "priority": 65,
+        "when": "Use when the user asks for info about level-up money rewards or the level/economy connection.",
+        "not_when": "Do not use for personal rank cards, XP leaderboards, or economy balance.",
+    },
+    "levels": {
+        "priority": 75,
+        "when": "Use when the user asks for the server XP leaderboard, top ranks, or highest levels.",
+        "not_when": "Do not use for one user's rank card; use rank for that.",
+    },
+    "rank": {
+        "priority": 80,
+        "when": "Use when the user asks for their own or another user's rank card, XP, or level.",
+        "not_when": "Do not use for the server leaderboard; use levels for that.",
+    },
 }
 
 
@@ -171,6 +265,7 @@ class CaineBot(commands.Bot):
                 settings.trusted_plugins,
                 chatgpt_activity_log_path(settings.data_dir),
                 code_model=settings.openai_code_model,
+                router_model=settings.openai_router_model,
             )
             if settings.openai_enabled
             else None
@@ -489,6 +584,7 @@ def install_commands(bot: CaineBot) -> None:
             f"- Discord Token: {env_status}",
             f"- OpenAI Key: {openai_status}",
             f"- OpenAI Text Model: `{bot.settings.openai_text_model}`",
+            f"- OpenAI Router Model: `{bot.settings.openai_router_model}`",
             f"- OpenAI Code Model: `{bot.settings.openai_code_model}`",
             f"- Geladene Plugins: {plugin_count}",
             f"- Trusted Plugins: `{bot.settings.trusted_plugins}`",
@@ -755,9 +851,51 @@ async def build_command_routing_catalog(
                 "level": command_level_label(getattr(spec, "level", CommandLevel.USER)),
                 "usage": f"{prefix}{command.name}",
                 "plugin": getattr(command, "caine_plugin_name", None) or "core",
+                "options": command_routing_options(spec),
+                "routing": command_routing_hints(command, spec),
             }
         )
     return result
+
+
+def command_routing_options(spec: CommandSpec | None) -> list[dict[str, object]]:
+    if not isinstance(spec, CommandSpec):
+        return []
+    return [
+        {
+            "name": option.name,
+            "description": option.description,
+            "type": option.type,
+            "required": option.required,
+        }
+        for option in spec.options
+    ]
+
+
+def command_routing_hints(command: commands.Command, spec: CommandSpec | None) -> dict[str, object]:
+    description = ""
+    priority = 50
+    when = ""
+    not_when = ""
+    if isinstance(spec, CommandSpec):
+        description = spec.description
+        priority = spec.routing_priority
+        when = spec.routing_when
+        not_when = spec.routing_not_when
+    if not description:
+        description = command.help or command.short_doc or command.name
+
+    override = ROUTING_HINT_OVERRIDES.get(command.name)
+    if override:
+        priority = int(override.get("priority", priority))
+        when = str(override.get("when", when))
+        not_when = str(override.get("not_when", not_when))
+
+    return {
+        "priority": priority,
+        "use_when": when or f"Use when the user asks for this behavior: {description}",
+        "avoid_when": not_when or "Avoid when another command is a clearer match; use ask for unrelated general chat.",
+    }
 
 
 def content_mentions_caine(content: str, bot_user: discord.abc.User | None = None) -> bool:

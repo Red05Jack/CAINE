@@ -58,6 +58,7 @@ def make_agent():
     responses = RecordingResponses()
     agent = object.__new__(OpenAIAgent)
     agent.text_model = "cheap-model"
+    agent.router_model = "router-model"
     agent.code_model = "code-model"
     agent.model = "code-model"
     agent.trusted_plugins = False
@@ -65,19 +66,21 @@ def make_agent():
     return agent, responses
 
 
-def test_config_splits_text_and_code_models(monkeypatch):
+def test_config_splits_text_router_and_code_models(monkeypatch):
     monkeypatch.setenv("OPENAI_TEXT_MODEL", "cheap-model")
+    monkeypatch.setenv("OPENAI_ROUTER_MODEL", "router-model")
     monkeypatch.setenv("OPENAI_CODE_MODEL", "code-model")
     monkeypatch.setenv("OPENAI_MODEL", "legacy-model")
 
     settings = load_settings()
 
     assert settings.openai_text_model == "cheap-model"
+    assert settings.openai_router_model == "router-model"
     assert settings.openai_code_model == "code-model"
     assert settings.openai_model == "code-model"
 
 
-def test_text_processing_uses_text_model():
+def test_text_processing_uses_text_and_router_models():
     agent, responses = make_agent()
 
     agent._answer_sync("Was kannst du?", "Jakob")
@@ -91,7 +94,7 @@ def test_text_processing_uses_text_model():
     )
 
     assert responses.create_models == ["cheap-model", "cheap-model"]
-    assert responses.parse_models == [("cheap-model", CommandRoute)]
+    assert responses.parse_models == [("router-model", CommandRoute)]
 
 
 def test_code_generation_uses_code_model():

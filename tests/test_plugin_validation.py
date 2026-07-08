@@ -82,6 +82,32 @@ async def setup_plugin(api):
     assert result.command_names == ["quiet"]
 
 
+def test_command_routing_metadata_is_allowed_in_command_object():
+    result = validate_plugin_source(
+        """
+PLUGIN = {"name": "konto", "description": "Account tools."}
+
+
+async def setup_plugin(api):
+    @api.command({
+        "names": ["konto"],
+        "description": "Shows your account.",
+        "level": "user",
+        "routing": {
+            "priority": 80,
+            "when": "Use for account balance questions.",
+            "not_when": "Do not use for general chat."
+        }
+    })
+    async def konto(ctx, args):
+        await api.reply(ctx, "konto")
+"""
+    )
+
+    assert result.ok
+    assert result.command_names == ["konto"]
+
+
 def test_plugin_level_shared_api_and_emit_are_allowed():
     result = validate_plugin_source(
         """
