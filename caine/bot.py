@@ -8,6 +8,7 @@ import discord
 from discord.ext import commands
 from openai import OpenAIError
 
+from caine import __version__
 from caine.command_system import (
     CommandLevel,
     CommandOption,
@@ -186,13 +187,13 @@ CORE_COMMANDS = {
         routing_when="Use when a kinger asks for recent ChatGPT, OpenAI, AI, or router activity logs.",
         routing_not_when="Do not use for ordinary user questions about commands or plugins.",
     ),
-    "health": CommandSpec(
-        ("health",),
-        "Checks CAINE runtime state.",
+    "caine": CommandSpec(
+        ("caine",),
+        "Checks CAINE runtime state and version.",
         CommandLevel.KINGER,
         "System",
         routing_priority=70,
-        routing_when="Use when a kinger asks for CAINE runtime status, configured models, tokens-present status, or OpenAI ping.",
+        routing_when="Use when a kinger asks for CAINE runtime status, version, configured models, tokens-present status, or OpenAI ping.",
         routing_not_when="Do not use for a casual 'how are you' question; use ask for that.",
     ),
 }
@@ -602,26 +603,40 @@ def install_commands(bot: CaineBot) -> None:
             await sync_application_commands(bot)
         await ctx.reply(f"{len(loaded)} Plugins neu geladen.", mention_author=False)
 
-    async def health(ctx: commands.Context, args: str = "") -> None:
+    async def caine_status(ctx: commands.Context, args: str = "") -> None:
         env_status = "gesetzt" if bot.settings.discord_token else "fehlt"
         openai_status = "gesetzt" if bot.agent is not None else "fehlt"
         plugin_count = len(bot.plugins.loaded)
+        approved_count = count_python_files(getattr(bot.plugins, "approved_dir", None))
+        pending_count = count_python_files(getattr(bot.plugins, "pending_dir", None))
+        guild_count = len(getattr(bot, "guilds", []) or [])
+        slash_state = "synchronisiert" if getattr(bot, "_slash_synced_after_ready", False) else "noch nicht synchronisiert"
+        runtime_state = "geladen" if getattr(bot, "_runtime_loaded_after_ready", False) else "noch nicht geladen"
         lines = [
-            "CAINE Health:",
+            "CAINE Status:",
+            f"- Version: `{__version__}`",
             f"- Discord Token: {env_status}",
             f"- OpenAI Key: {openai_status}",
             f"- OpenAI Text Model: `{bot.settings.openai_text_model}`",
             f"- OpenAI Router Model: `{bot.settings.openai_router_model}`",
             f"- OpenAI Code Model: `{bot.settings.openai_code_model}`",
             f"- Geladene Plugins: {plugin_count}",
+            f"- Approved Plugin-Dateien: {approved_count}",
+            f"- Pending Plugin-Dateien: {pending_count}",
             f"- Trusted Plugins: `{bot.settings.trusted_plugins}`",
             f"- Plugin DB: `{getattr(getattr(bot, 'plugin_storage', None), 'last_loaded_source', 'unbekannt')}`",
+            f"- Guilds: {guild_count}",
+            f"- Runtime Load: `{runtime_state}`",
+            f"- Slash Sync: `{slash_state}`",
         ]
         if bot.agent is not None:
             async with ctx.typing():
-                result = await bot.agent.health_check()
+                try:
+                    result = await bot.agent.health_check()
+                except OpenAIError as exc:
+                    result = f"Fehler: {str(exc)[:300]}"
             lines.append(f"- OpenAI Ping: `{result[:300]}`")
-        await ctx.reply("\n".join(lines), mention_author=False)
+        await send_long(ctx, "\n".join(lines))
 
     async def chatgpt_logs(ctx: commands.Context, args: str = "") -> None:
         path = chatgpt_activity_log_path(bot.settings.data_dir)
@@ -650,7 +665,7 @@ def install_commands(bot: CaineBot) -> None:
         "reject": reject,
         "reload_plugins": reload_plugins,
         "chatgpt_logs": chatgpt_logs,
-        "health": health,
+        "caine": caine_status,
     }
     for command_name, handler in handlers.items():
         register_dual_command(bot, CORE_COMMANDS[command_name], handler)
@@ -660,6 +675,15 @@ async def send_long(ctx: commands.Context, content: str) -> None:
     chunks = [content[index : index + 1900] for index in range(0, len(content), 1900)] or [""]
     for chunk in chunks[:5]:
         await ctx.reply(chunk, mention_author=False)
+
+
+def count_python_files(directory: Path | str | None) -> int:
+    if directory is None:
+        return 0
+    path = Path(directory)
+    if not path.exists():
+        return 0
+    return sum(1 for item in path.glob("*.py") if item.name != "__init__.py")
 
 
 def pending_activation_hint(prefix: str, plugin_id: str, validation: object, replacement: bool = False) -> str:

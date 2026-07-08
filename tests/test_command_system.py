@@ -137,7 +137,7 @@ def test_command_object_registers_prefix_alias_and_slash_alias():
 def test_admin_and_kinger_commands_are_prefix_only_by_default():
     bot = commands.Bot(command_prefix="!", intents=discord.Intents.default(), help_command=None)
     admin_spec = command_spec({"names": ["approve"], "description": "Approve.", "level": "admin"})
-    kinger_spec = command_spec({"names": ["health"], "description": "Health.", "level": "kinger"})
+    kinger_spec = command_spec({"names": ["caine"], "description": "CAINE status.", "level": "kinger"})
 
     async def handler(ctx, args):
         pass
@@ -146,9 +146,9 @@ def test_admin_and_kinger_commands_are_prefix_only_by_default():
     register_dual_command(bot, kinger_spec, handler)
 
     assert bot.get_command("approve") is not None
-    assert bot.get_command("health") is not None
+    assert bot.get_command("caine") is not None
     assert bot.tree.get_command("approve") is None
-    assert bot.tree.get_command("health") is None
+    assert bot.tree.get_command("caine") is None
     assert not should_register_slash_command(admin_spec)
     assert not should_register_slash_command(kinger_spec)
 

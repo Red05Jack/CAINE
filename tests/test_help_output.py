@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import discord
 from discord.ext import commands
 
+from caine import __version__
 from caine.bot import build_general_help_text, build_plugin_help_text, install_commands
 from caine.command_system import build_prefix_command, command_spec
 from caine.plugin_manager import PluginManager
@@ -44,6 +45,14 @@ class FakeMember:
         self.guild_permissions = SimpleNamespace(administrator=administrator)
 
 
+class FakeReplyContext:
+    def __init__(self):
+        self.replies = []
+
+    async def reply(self, content, mention_author=False):
+        self.replies.append((content, mention_author))
+
+
 def run(coro):
     return asyncio.run(coro)
 
@@ -55,7 +64,15 @@ def make_bot(tmp_path):
         help_command=None,
     )
     bot.owner_id = 999999
-    bot.settings = SimpleNamespace(command_prefix="!", command_permissions_path=None)
+    bot.settings = SimpleNamespace(
+        command_prefix="!",
+        command_permissions_path=None,
+        discord_token="token",
+        openai_text_model="gpt-5-nano",
+        openai_router_model="gpt-5-mini",
+        openai_code_model="gpt-5.5",
+        trusted_plugins=True,
+    )
     bot.plugins = PluginManager(
         bot=bot,
         pending_dir=tmp_path / "plugins" / "pending",
@@ -89,7 +106,8 @@ def test_general_help_groups_core_commands_and_summarizes_plugins(tmp_path):
     assert "`!ask`: Asks C.A.I.N.E. via OpenAI." in text
     assert "[S3]" not in text
     assert "`!evolve` [S2]" not in text
-    assert "`!health` [S1]" not in text
+    assert "`!caine` [S1]" not in text
+    assert "`!health`" not in text
     assert "Plugins:" in text
     assert "`hello_plugin` (1 Commands)" in text
     assert "`!help hello_plugin`" in text
@@ -124,7 +142,8 @@ def test_admin_help_includes_admin_commands_but_not_kinger(tmp_path):
     assert "Admin commands:" in text
     assert "`!evolve`: Creates a pending plugin from a feature request." in text
     assert "[S2]" not in text
-    assert "`!health` [S1]" not in text
+    assert "`!caine` [S1]" not in text
+    assert "`!health`" not in text
     assert "Commands:" in plugin_text
     assert "Admin commands:" in plugin_text
     assert "`!adminhello`: Admin hello." in plugin_text
@@ -142,7 +161,8 @@ def test_kinger_help_includes_kinger_commands_but_not_admin(tmp_path):
     assert "Commands:" in text
     assert "Kinger:" in text
     assert "`!help`: Shows core commands and plugin details." in text
-    assert "`!health`: Checks CAINE runtime state." in text
+    assert "`!caine`: Checks CAINE runtime state and version." in text
+    assert "`!health`" not in text
     assert "`!chatgpt-logs`" in text
     assert "Shows recent ChatGPT activity audit logs." in text
     assert "`!evolve` [S2]" not in text
@@ -151,6 +171,23 @@ def test_kinger_help_includes_kinger_commands_but_not_admin(tmp_path):
     assert "`!hello`: Begruesst dich." in plugin_text
     assert "`!kinghello`: Kinger hello." in plugin_text
     assert "`!adminhello` [S2]" not in plugin_text
+
+
+def test_caine_status_replaces_health_and_shows_version(tmp_path):
+    bot = make_bot(tmp_path)
+
+    assert bot.get_command("health") is None
+    command = bot.get_command("caine")
+    assert command is not None
+
+    ctx = FakeReplyContext()
+    run(command.caine_handler(ctx, ""))
+
+    text = ctx.replies[0][0]
+    assert "CAINE Status:" in text
+    assert f"- Version: `{__version__}`" in text
+    assert "- OpenAI Text Model: `gpt-5-nano`" in text
+    assert "- OpenAI Ping:" not in text
 
 
 def test_long_plugin_help_compacts_to_single_discord_message(tmp_path):
