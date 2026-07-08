@@ -2,7 +2,6 @@ import asyncio
 import datetime as _dt
 import hashlib
 import io
-import json
 import math
 import re
 import time
@@ -250,7 +249,7 @@ def _is_xp_excluded_command(content: str) -> bool:
     return name in {
         'help', 'levels', 'leaderboard', 'rangliste',
         'rank', 'set-rank-color', 'set-rank-colour', 'remove-xp', 'removexp',
-        'give-xp', 'givexp', 'importdb', 'recalculate', 'xp-liste',
+        'give-xp', 'givexp', 'recalculate', 'xp-liste',
         'einladungen-nachbearbeiten', 'level-money', 'level-geld', 'level-glitzerchips',
         'level-money-info', 'levelgeld', 'level-money-audit', 'level-geld-audit'
     }
@@ -815,9 +814,6 @@ async def setup_plugin(api):
             gs = _ensure_guild(state, int(guild_id))
             return dict(_settings(gs))
 
-    async def api_export_snapshot(payload: Any = None) -> Dict[str, Any]:
-        return await _storage_get(api)
-
     try:
         if isinstance(getattr(api, 'shared', None), dict):
             api.shared['level_manege.api'] = {
@@ -826,8 +822,7 @@ async def setup_plugin(api):
                 'get_settings': api_get_settings,
                 'level_from_xp': level_from_xp,
                 'xp_for_next_level': xp_for_next_level,
-                'calculate_message_xp': calculate_message_xp,
-                'export_snapshot': api_export_snapshot
+                'calculate_message_xp': calculate_message_xp
             }
     except Exception:
         pass
@@ -1235,57 +1230,6 @@ async def setup_plugin(api):
         await api.reply(ctx, '\n'.join(lines))
 
     @api.command({
-        'names': ['importdb'],
-        'description': 'Importiert einen bot-db.json Snapshot aus Nachrichten-Anhängen.',
-        'level': 'kinger',
-        'options': [{'name': 'file', 'description': 'bot-db.json Snapshot.', 'type': 'attachment', 'required': True}]
-    })
-    async def importdb_command(ctx, args):
-        guild_id = _guild_id_from_ctx(ctx)
-        author = _author_from_ctx(ctx)
-        if guild_id is None or author is None:
-            await api.reply(ctx, 'Import nur in einer Server-Manege, bitte.')
-            return
-        if not _member_has_kinger(author):
-            await api.reply(ctx, 'S1-Kuppel geschlossen. Nur Kinger/Bot-Master dürfen die Datenkiste öffnen.')
-            return
-        message = getattr(ctx, 'message', ctx)
-        attachments = getattr(message, 'attachments', []) or []
-        if not attachments:
-            await api.reply(ctx, 'Bitte hänge eine `bot-db.json` an. Ohne Datei bleibt die Importkanone leer.')
-            return
-        imported = 0
-        async with _STATE_LOCK:
-            state = await _storage_get(api)
-            gs = _ensure_guild(state, guild_id)
-            for att in attachments:
-                name = str(getattr(att, 'filename', '')).lower()
-                if not name.endswith('.json'):
-                    continue
-                try:
-                    data_bytes = await att.read()
-                    snap = json.loads(data_bytes.decode('utf-8'))
-                except Exception:
-                    continue
-                if str(snap.get('guildId')) != str(guild_id):
-                    continue
-                for entry in snap.get('users', []):
-                    try:
-                        uid = int(entry.get('userId'))
-                    except Exception:
-                        continue
-                    user = _ensure_user(gs, uid)
-                    user['message_xp'] = max(int(user.get('message_xp', 0)), int(entry.get('messageXp', 0)))
-                    user['voice_xp'] = max(int(user.get('voice_xp', 0)), int(entry.get('voiceXp', 0)))
-                    user['invite_xp'] = max(int(user.get('invite_xp', 0)), int(entry.get('inviteXp', 0)))
-                    user['manual_xp'] = max(int(user.get('manual_xp', 0)), int(entry.get('manualXp', 0)))
-                    color = str(entry.get('rankColor', _DEFAULT_COLOR)).upper()
-                    user['rank_color'] = color if _HEX_RE.match(color) else _DEFAULT_COLOR
-                    imported += 1
-            await _storage_set(api, state)
-        await api.reply(ctx, f'Import-Manege geschlossen: **{imported} Profile** wurden gemerged. Pro XP-Konto gewann der größte Wert.')
-
-    @api.command({
         'names': ['recalculate'],
         'description': '/recalculate all|Messages|invites. Messages scannt erreichbare Channel-History neu.',
         'level': 'kinger',
@@ -1448,10 +1392,6 @@ async def setup_plugin(api):
                 changed = True
             if changed:
                 await _storage_set(api, state)
-
-    @api.on('level_manege.export_snapshot')
-    async def export_snapshot(payload=None):
-        return await api_export_snapshot(payload)
 
     @api.on('level_manege.get_profile')
     async def on_get_profile(payload=None):

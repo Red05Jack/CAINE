@@ -142,3 +142,23 @@ def test_plugin_api_storage_uses_shared_memory_without_local_files(tmp_path):
 
     assert run(api.storage_get("state")) == {"value": 42}
     assert not (tmp_path / "demo.json").exists()
+
+
+def test_approved_plugins_do_not_keep_legacy_bot_db_imports():
+    approved_dir = Path(__file__).resolve().parents[1] / "plugins" / "approved"
+    forbidden_tokens = [
+        "'names': ['importdb']",
+        '"names": ["importdb"]',
+        "bot-db.json Snapshot",
+        "level_manege.export_snapshot",
+        "api_export_snapshot",
+    ]
+
+    offenders = []
+    for plugin_path in approved_dir.glob("*.py"):
+        source = plugin_path.read_text(encoding="utf-8")
+        for token in forbidden_tokens:
+            if token in source:
+                offenders.append(f"{plugin_path.name}: {token}")
+
+    assert offenders == []
