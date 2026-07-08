@@ -144,6 +144,29 @@ def test_plugin_api_storage_uses_shared_memory_without_local_files(tmp_path):
     assert not (tmp_path / "demo.json").exists()
 
 
+def test_plugin_api_storage_can_migrate_renamed_plugin_namespace(tmp_path):
+    storage = InMemoryPluginStorage({"plugins": {"old_name": {"state": {"coins": 5}}}})
+    api = PluginAPI(
+        bot=SimpleNamespace(),
+        plugin_name="new_name",
+        data_dir=Path(tmp_path),
+        register_command=lambda plugin_name, command: None,
+        register_event=lambda plugin_name, event_name, handler: None,
+        subscribe=lambda plugin_name, topic, handler: None,
+        emit=lambda plugin_name, topic, *args, **kwargs: [],
+        manager=SimpleNamespace(),
+        shared={},
+        storage=storage,
+    )
+
+    assert run(api.storage_migrate_from("old_name")) is True
+
+    assert run(api.storage_get("state")) == {"coins": 5}
+    snapshot = storage.snapshot()["plugins"]
+    assert "new_name" in snapshot
+    assert "old_name" not in snapshot
+
+
 def test_approved_plugins_do_not_keep_legacy_bot_db_imports():
     approved_dir = Path(__file__).resolve().parents[1] / "plugins" / "approved"
     forbidden_tokens = [

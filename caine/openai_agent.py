@@ -388,6 +388,13 @@ PLUGIN_HIERARCHY_STANDARD = dedent(
     Jedes neu erzeugte Plugin muss als kleine, bedienbare Produktflaeche
     geplant werden, nicht als einzelner isolierter Befehl.
 
+    Befehlsnamen:
+       - nutze englische Hauptbefehle als erstes Element in "names"
+         (z. B. ["coins", "konto"] statt ["konto", "coins"])
+       - deutsche Begriffe duerfen als Aliases erhalten bleiben, wenn sie
+         fuer die Server-Community hilfreich sind
+       - Beispiele und Routing sollen den englischen Hauptbefehl bevorzugen
+
     Baue die Funktion immer in diese Ebenen:
 
     1. S3 / Commands / Nutzer:
@@ -943,6 +950,10 @@ class OpenAIAgent:
                 - Build the command surface in the hierarchy from the CAINE
                   plugin hierarchy: user commands, admin moderation/config
                   commands, kinger/master commands, and a Python-level API.
+                - Command names must use an English primary command as the
+                  first entry in "names"; German names may be aliases after it.
+                  Examples and routing text should prefer the English primary
+                  command.
                 - Do not register a command named "help"; CAINE provides
                   global plugin details through !help <pluginname>.
                 - Command handlers must be async def handler(ctx, args): ...
@@ -998,6 +1009,9 @@ class OpenAIAgent:
               one or more "user" commands for normal use, one or more "admin"
               commands for moderation/config/status, and a "kinger" command for
               high-trust audit/debug/export/reset behavior when meaningful.
+            - Command names must use an English primary command as the first
+              entry in "names"; German names may be aliases after it. Examples
+              and routing text should prefer the English primary command.
             - Add slash options only when the command truly needs input.
               Option objects are {"name": "...", "description": "...",
               "type": "string|integer|number|boolean|user|channel|role|attachment",
@@ -1078,6 +1092,10 @@ class OpenAIAgent:
               block plus the new lines inserted.
             - Preserve the existing PLUGIN name unless the user explicitly asks to rename it.
             - Preserve existing commands and behavior unless the requested change requires edits.
+            - When adding commands, use an English primary command as the first
+              entry in "names"; German names may be aliases after it. For
+              existing German-primary commands, switch the primary name to
+              English when the user asks for command cleanup or renaming.
             - When adding or editing @api.command metadata, include or preserve
               "examples": ["!command example"]. Use 1-3 complete visible prefix
               invocations per command so !help can show users how to run it.

@@ -5,6 +5,7 @@ import discord
 from discord.ext import commands
 
 from caine.bot import build_general_help_text, build_plugin_help_text, install_commands
+from caine.command_system import build_prefix_command, command_spec
 from caine.plugin_manager import PluginManager
 
 
@@ -150,3 +151,38 @@ def test_kinger_help_includes_kinger_commands_but_not_admin(tmp_path):
     assert "`!hello`: Begruesst dich." in plugin_text
     assert "`!kinghello`: Kinger hello." in plugin_text
     assert "`!adminhello` [S2]" not in plugin_text
+
+
+def test_long_plugin_help_compacts_to_single_discord_message(tmp_path):
+    bot = make_bot(tmp_path)
+    commands_for_plugin = []
+
+    async def handler(ctx, args):
+        return None
+
+    for index in range(18):
+        spec = command_spec({
+            "names": [f"tool-{index}", f"tool-{index}-alias"],
+            "description": f"Admin command {index} with enough text to make the help output long.",
+            "level": "admin" if index < 14 else "kinger",
+            "examples": [
+                f"!tool-{index} @User 50 correction",
+                f"!tool-{index} @User 100 event",
+            ],
+        })
+        command = build_prefix_command(bot, spec, handler, plugin_name="economy")
+        bot.add_command(command)
+        commands_for_plugin.append(command.name)
+
+    bot.plugins.loaded["economy"] = SimpleNamespace(
+        name="economy",
+        description="Economy tools with many commands.",
+        path=tmp_path / "plugins" / "approved" / "economy.py",
+        commands=commands_for_plugin,
+    )
+
+    text = run(build_plugin_help_text(bot, "economy", None))
+
+    assert text is not None
+    assert len(text) <= 1900
+    assert "Bsp:" in text or "Beispiel:" not in text

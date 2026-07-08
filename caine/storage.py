@@ -47,6 +47,34 @@ class InMemoryPluginStorage:
         plugin.pop(str(key), None)
         await self.backup()
 
+    async def migrate_plugin_namespace(
+        self,
+        old_plugin_name: str,
+        new_plugin_name: str,
+        *,
+        delete_old: bool = True,
+    ) -> bool:
+        old_name = _clean_plugin_name(old_plugin_name)
+        new_name = _clean_plugin_name(new_plugin_name)
+        if old_name == new_name:
+            return False
+        source = self._data.get(old_name)
+        if not isinstance(source, dict) or not source:
+            return False
+
+        target = self._data.setdefault(new_name, {})
+        changed = False
+        for key, value in source.items():
+            if key not in target:
+                target[key] = _json_clone(value)
+                changed = True
+        if delete_old and old_name in self._data:
+            self._data.pop(old_name, None)
+            changed = True
+        if changed:
+            await self.backup()
+        return changed
+
     async def backup(self) -> None:
         self.loaded = True
 

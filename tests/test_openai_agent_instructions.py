@@ -20,6 +20,7 @@ def test_untrusted_plugin_generation_instructions_require_hierarchy_and_shared_a
     assert "Every command must include 1-3 examples" in instructions
     assert '"routing": {' in instructions
     assert "Every command must include routing metadata" in instructions
+    assert "English primary command" in instructions
     assert 'api.shared["plugin_id.api"]' in instructions
     assert "Do not use @api.on(...) in untrusted plugins" in instructions
 
@@ -43,6 +44,7 @@ def test_trusted_plugin_generation_instructions_allow_bus_integrations():
     assert "Every command must include 1-3 examples" in instructions
     assert "Every command must include routing metadata" in instructions
     assert "Admin and kinger commands must stay prefix-only" in instructions
+    assert "English primary command" in instructions
 
 
 def test_plugin_update_instructions_keep_hierarchy_contract():
@@ -55,6 +57,7 @@ def test_plugin_update_instructions_keep_hierarchy_contract():
     assert "Python-level API for other plugins" in instructions
     assert '"examples": ["!command example"]' in instructions
     assert "routing metadata" in instructions
+    assert "English primary command" in instructions
     assert "Slash commands are currently S3/user-only" in instructions
     assert "Return only a minimal list of exact source replacements" in instructions
     assert "Do not return a complete replacement file" in instructions
@@ -82,11 +85,11 @@ def test_command_router_prompt_includes_replied_caine_message_context():
         "Jakob",
         [{"name": "ask", "aliases": [], "description": "Ask CAINE"}],
         "!",
-        "CAINE: Nutze `!help level_manege` fuer Details.",
+        "CAINE: Nutze `!help levels` fuer Details.",
     )
 
     assert route.command_name == "ask"
-    assert "Replied-to CAINE message: CAINE: Nutze `!help level_manege` fuer Details." in responses.input
+    assert "Replied-to CAINE message: CAINE: Nutze `!help levels` fuer Details." in responses.input
     assert "replied-to message as context" in responses.instructions
     assert "already filtered by the user's" in responses.instructions
     assert "including admin or kinger commands" in responses.instructions

@@ -123,3 +123,9 @@ class PluginAPI:
 
     async def storage_delete(self, key: str) -> None:
         await self._storage.delete(self._plugin_name, str(key))
+
+    async def storage_migrate_from(self, old_plugin_name: str, *, delete_old: bool = True) -> bool:
+        migrate = getattr(self._storage, "migrate_plugin_namespace", None)
+        if not callable(migrate):
+            return False
+        return await migrate(str(old_plugin_name), self._plugin_name, delete_old=delete_old)

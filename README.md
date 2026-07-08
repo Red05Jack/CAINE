@@ -155,5 +155,5 @@ python main.py
 ## Tests
 
 ```powershell
-pytest
+python -m pytest
 ```

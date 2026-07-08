@@ -215,19 +215,39 @@ ROUTING_HINT_OVERRIDES = {
         "when": "Use only when the user explicitly wants to run the hello/greeting demo command.",
         "not_when": "Do not use for small talk such as 'wie gehts' or 'wie geht es dir'; use ask.",
     },
-    "konto": {
+    "coins": {
         "priority": 80,
-        "when": "Use when the user asks for their Glitzerchip or economy account balance/status.",
+        "when": "Use when the user asks for their economy account balance, money balance, Guthaben, or Konto.",
         "not_when": "Do not use for Discord account, OpenAI account, or vague account-management questions.",
     },
-    "geld": {
-        "priority": 60,
-        "when": "Use when the user asks for the economy command overview covering account, daily, shop, games, transfers, or leaderboard.",
-        "not_when": "Do not use for a personal balance question; use konto for that.",
+    "shop": {
+        "priority": 70,
+        "when": "Use when the user asks for the economy shop or buyable items.",
+        "not_when": "Do not use for XP or level leaderboards.",
+    },
+    "buy": {
+        "priority": 75,
+        "when": "Use when the user wants to buy or purchase an item from the economy shop.",
+        "not_when": "Do not use for sending money to another member; use send.",
+    },
+    "inventory": {
+        "priority": 75,
+        "when": "Use when the user asks for their owned economy items or inventory.",
+        "not_when": "Do not use for balance-only questions; use coins.",
+    },
+    "send": {
+        "priority": 75,
+        "when": "Use when the user wants to send, pay, transfer, or give economy money to another member.",
+        "not_when": "Do not use for level reward configuration or shop purchases.",
+    },
+    "richest": {
+        "priority": 70,
+        "when": "Use when the user asks for the economy money leaderboard or richest users.",
+        "not_when": "Do not use for XP or level leaderboards; use levels.",
     },
     "level-money": {
         "priority": 65,
-        "when": "Use when the user asks how level-ups and Glitzerchip rewards are connected.",
+        "when": "Use when an admin asks how level-ups and economy rewards are connected or configured.",
         "not_when": "Do not use for personal rank cards, XP leaderboards, or economy balance.",
     },
     "level-money-info": {
@@ -726,7 +746,35 @@ async def build_plugin_help_text(
     else:
         lines.extend(format_commands_by_level(commands_for_plugin, prefix))
 
-    return "\n".join(lines)[:3900]
+    text = "\n".join(lines)
+    if len(text) <= 1900:
+        return text
+
+    compact_lines = [
+        f"Plugin `{plugin.name}`",
+        plugin.description or "ohne Beschreibung",
+        "",
+    ]
+    compact_lines.extend(
+        format_commands_by_level(commands_for_plugin, prefix, compact=True, include_examples=True)
+    )
+    text = "\n".join(compact_lines)
+    if len(text) <= 1900:
+        return text
+
+    compact_lines = [
+        f"Plugin `{plugin.name}`",
+        plugin.description or "ohne Beschreibung",
+        "",
+    ]
+    compact_lines.extend(
+        format_commands_by_level(commands_for_plugin, prefix, compact=True, include_examples=False)
+    )
+    text = "\n".join(compact_lines)
+    if len(text) <= 1900:
+        return text
+
+    return text[:1890] + "\n..."
 
 
 async def registered_plugin_commands(
@@ -998,6 +1046,8 @@ def format_command_help_line(
     command: commands.Command,
     prefix: str,
     show_level_labels: bool = True,
+    compact: bool = False,
+    include_examples: bool = True,
 ) -> str:
     aliases = [alias for alias in command.aliases if alias != command.name]
     alias_text = ""
@@ -1008,16 +1058,20 @@ def format_command_help_line(
     level = f" {command_level_label(getattr(spec, 'level', None))}" if show_level_labels else ""
     description = getattr(spec, "description", None) or command.help or command.short_doc or "ohne Beschreibung"
     line = f"- `{prefix}{command.name}`{level}{alias_text}: {description}"
-    examples = command_examples(spec)
+    examples = command_examples(spec) if include_examples else []
     if examples:
-        example_text = ", ".join(f"`{example}`" for example in examples)
-        line += f"\n  Beispiel: {example_text}"
+        shown_examples = examples[:1] if compact else examples
+        example_text = ", ".join(f"`{example}`" for example in shown_examples)
+        separator = " Bsp: " if compact else "\n  Beispiel: "
+        line += f"{separator}{example_text}"
     return line
 
 
 def format_commands_by_level(
     command_list: list[commands.Command],
     prefix: str,
+    compact: bool = False,
+    include_examples: bool = True,
 ) -> list[str]:
     lines: list[str] = []
     for level, heading in COMMAND_LEVEL_HELP_GROUPS:
@@ -1028,7 +1082,13 @@ def format_commands_by_level(
             lines.append("")
         lines.append(f"{heading}:")
         lines.extend(
-            format_command_help_line(command, prefix, show_level_labels=False)
+            format_command_help_line(
+                command,
+                prefix,
+                show_level_labels=False,
+                compact=compact,
+                include_examples=include_examples,
+            )
             for command in group_commands
         )
     return lines

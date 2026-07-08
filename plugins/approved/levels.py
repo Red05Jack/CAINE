@@ -21,11 +21,12 @@ except Exception:  # pragma: no cover
     ImageFilter = None
 
 PLUGIN = {
-    'name': 'Level-Manege',
-    'description': 'XP-, Level-, Rankkarten- und Glitzerchip-Verbindungs-Apparat: /rank, !levels, Rank-Farbe, manuelle XP, Recalculate-Werkzeuge und Level-Up-Geldbelohnungen via glitzerchip_manege.'
+    'name': 'levels',
+    'description': 'XP-, Level-, Rankkarten- und Economy-Anbindung: /rank, !levels, Rank-Farbe, manuelle XP, Recalculate-Werkzeuge und steigende Level-Up-Geldbelohnungen.'
 }
 
-_STORAGE_KEY = 'level_manege_state_v1'
+_STORAGE_KEY = 'levels_state_v1'
+_LEGACY_STORAGE_KEY = 'level_manege_state_v1'
 _DEFAULT_COLOR = '#009FA1'
 _OLD_DEFAULT_COLOR = '#FFFFFF'
 _HEX_RE = re.compile(r'^#[0-9A-Fa-f]{6}$')
@@ -37,13 +38,22 @@ _COMMAND_PREFIXES = ('!', '/')
 _COOLDOWNS: Dict[Tuple[str, int, int], float] = {}
 _STATE_LOCK = asyncio.Lock()
 
-_GLITZER_DEFAULTS = {
-    'glitzerchipEnabled': True,
-    'glitzerchipRewardBase': 25,
-    'glitzerchipRewardPerLevel': 5,
-    'glitzerchipRewardMaxPerLevel': 500,
-    'glitzerchipCurrencyName': 'Glitzerchips',
-    'glitzerchipAnnounce': True
+_ECONOMY_DEFAULTS = {
+    'economyEnabled': True,
+    'economyRewardBase': 25,
+    'economyRewardGrowth': 8,
+    'economyRewardExponentPercent': 135,
+    'economyRewardMaxPerLevel': 0,
+    'economyCurrencyName': 'Glitzerchips',
+    'economyAnnounce': True
+}
+
+_LEGACY_ECONOMY_SETTINGS = {
+    'glitzerchipEnabled': 'economyEnabled',
+    'glitzerchipRewardBase': 'economyRewardBase',
+    'glitzerchipRewardPerLevel': 'economyRewardGrowth',
+    'glitzerchipCurrencyName': 'economyCurrencyName',
+    'glitzerchipAnnounce': 'economyAnnounce'
 }
 
 RANK_HTML_TEMPLATE = '''<!DOCTYPE html>
@@ -59,6 +69,24 @@ def _now_iso() -> str:
 
 def _empty_state() -> Dict[str, Any]:
     return {'version': 1, 'guilds': {}}
+
+
+def _migrate_economy_settings(settings: Dict[str, Any]) -> None:
+    for old_key, new_key in _LEGACY_ECONOMY_SETTINGS.items():
+        if old_key in settings and new_key not in settings:
+            settings[new_key] = settings[old_key]
+    if 'economyRewardMaxPerLevel' not in settings and 'glitzerchipRewardMaxPerLevel' in settings:
+        try:
+            old_cap = max(0, int(settings.get('glitzerchipRewardMaxPerLevel', 0)))
+        except Exception:
+            old_cap = 0
+        if old_cap and old_cap != 500:
+            settings['economyRewardMaxPerLevel'] = old_cap
+    try:
+        if int(settings.get('economyRewardMaxPerLevel', 0)) in {500, 5000}:
+            settings['economyRewardMaxPerLevel'] = 0
+    except Exception:
+        settings['economyRewardMaxPerLevel'] = 0
 
 
 def _guild_id_from_ctx(ctx: Any) -> Optional[int]:
@@ -98,6 +126,18 @@ async def _storage_get(api: Any) -> Dict[str, Any]:
     except TypeError:
         value = await api.storage_get(_STORAGE_KEY, None)
     if not isinstance(value, dict):
+        try:
+            legacy_value = await api.storage_get(_LEGACY_STORAGE_KEY)
+        except TypeError:
+            legacy_value = await api.storage_get(_LEGACY_STORAGE_KEY, None)
+        if isinstance(legacy_value, dict):
+            value = legacy_value
+            await api.storage_set(_STORAGE_KEY, value)
+            try:
+                await api.storage_delete(_LEGACY_STORAGE_KEY)
+            except Exception:
+                pass
+    if not isinstance(value, dict):
         return _empty_state()
     value.setdefault('version', 1)
     value.setdefault('guilds', {})
@@ -114,13 +154,16 @@ def _ensure_guild(state: Dict[str, Any], guild_id: int) -> Dict[str, Any]:
     guild_state.setdefault('users', {})
     guild_state.setdefault('message_xp', {})
     guild_state.setdefault('ledger', [])
-    guild_state.setdefault('glitzerchip_rewards', {})
+    if 'economy_rewards' not in guild_state and isinstance(guild_state.get('glitzerchip_rewards'), dict):
+        guild_state['economy_rewards'] = guild_state['glitzerchip_rewards']
+    guild_state.setdefault('economy_rewards', {})
     settings = guild_state.setdefault('settings', {})
     settings.setdefault('messageXpMin', _MESSAGE_XP_MIN)
     settings.setdefault('messageXpMax', _MESSAGE_XP_MAX)
     settings.setdefault('levelUpChannelId', 0)
     settings.setdefault('rewardBots', False)
-    for key, value in _GLITZER_DEFAULTS.items():
+    _migrate_economy_settings(settings)
+    for key, value in _ECONOMY_DEFAULTS.items():
         settings.setdefault(key, value)
     return guild_state
 
@@ -143,7 +186,8 @@ def _ensure_user(guild_state: Dict[str, Any], user_id: int) -> Dict[str, Any]:
 
 def _settings(guild_state: Dict[str, Any]) -> Dict[str, Any]:
     s = guild_state.setdefault('settings', {})
-    for key, value in _GLITZER_DEFAULTS.items():
+    _migrate_economy_settings(s)
+    for key, value in _ECONOMY_DEFAULTS.items():
         s.setdefault(key, value)
     return s
 
@@ -250,7 +294,7 @@ def _is_xp_excluded_command(content: str) -> bool:
         'help', 'levels', 'leaderboard', 'rangliste',
         'rank', 'set-rank-color', 'set-rank-colour', 'remove-xp', 'removexp',
         'give-xp', 'givexp', 'recalculate', 'xp-liste',
-        'einladungen-nachbearbeiten', 'level-money', 'level-geld', 'level-glitzerchips',
+        'einladungen-nachbearbeiten', 'level-money', 'level-geld',
         'level-money-info', 'levelgeld', 'level-money-audit', 'level-geld-audit'
     }
 
@@ -531,6 +575,18 @@ def _make_rank_card_png(username: str, rank: int, level: int, progress: int, nee
 
 
 async def _send_rank_card(ctx: Any, api: Any, png_bytes: bytes) -> None:
+    interaction = getattr(ctx, 'interaction', None)
+    if discord is not None and interaction is not None:
+        try:
+            file = discord.File(io.BytesIO(png_bytes), filename='rank.png')
+            response = getattr(interaction, 'response', None)
+            if response is not None and not response.is_done():
+                await response.send_message(file=file)
+            else:
+                await interaction.followup.send(file=file)
+            return
+        except Exception:
+            pass
     channel = _channel_from_ctx(ctx)
     if discord is not None and channel is not None and hasattr(channel, 'send'):
         try:
@@ -540,6 +596,18 @@ async def _send_rank_card(ctx: Any, api: Any, png_bytes: bytes) -> None:
         except Exception:
             pass
     await api.reply(ctx, 'Die Rank-Karte wurde gezeichnet, aber ich konnte keine Datei senden. Prüfe bitte meine Kanalrechte: View Channel, Send Messages und Attach Files.')
+
+
+async def _defer_slash_if_needed(ctx: Any) -> None:
+    interaction = getattr(ctx, 'interaction', None)
+    response = getattr(interaction, 'response', None)
+    if response is None:
+        return
+    try:
+        if not response.is_done():
+            await response.defer(thinking=True)
+    except Exception:
+        pass
 
 
 def _cooldown_ok(command: str, guild_id: int, user_id: int, seconds: int) -> Tuple[bool, int]:
@@ -559,12 +627,26 @@ def _display_name_for(guild: Any, uid: int, user: Dict[str, Any]) -> str:
     return str(user.get('last_seen_name') or uid)
 
 
-def _glitzer_reward_for_level(settings: Dict[str, Any], level: int) -> int:
-    base = max(0, int(settings.get('glitzerchipRewardBase', _GLITZER_DEFAULTS['glitzerchipRewardBase'])))
-    per = max(0, int(settings.get('glitzerchipRewardPerLevel', _GLITZER_DEFAULTS['glitzerchipRewardPerLevel'])))
-    cap = max(0, int(settings.get('glitzerchipRewardMaxPerLevel', _GLITZER_DEFAULTS['glitzerchipRewardMaxPerLevel'])))
-    amount = base + max(0, int(level)) * per
+def _economy_reward_for_level(settings: Dict[str, Any], level: int) -> int:
+    _migrate_economy_settings(settings)
+    base = max(0, int(settings.get('economyRewardBase', _ECONOMY_DEFAULTS['economyRewardBase'])))
+    growth = max(0, int(settings.get('economyRewardGrowth', _ECONOMY_DEFAULTS['economyRewardGrowth'])))
+    exponent_percent = max(100, int(settings.get('economyRewardExponentPercent', _ECONOMY_DEFAULTS['economyRewardExponentPercent'])))
+    cap = max(0, int(settings.get('economyRewardMaxPerLevel', _ECONOMY_DEFAULTS['economyRewardMaxPerLevel'])))
+    safe_level = max(0, int(level))
+    exponent = exponent_percent / 100.0
+    amount = int(round(base + growth * math.pow(safe_level, exponent)))
     return min(amount, cap) if cap > 0 else amount
+
+
+def _economy_reward_formula_text(settings: Dict[str, Any]) -> str:
+    _migrate_economy_settings(settings)
+    base = int(settings.get('economyRewardBase', _ECONOMY_DEFAULTS['economyRewardBase']))
+    growth = int(settings.get('economyRewardGrowth', _ECONOMY_DEFAULTS['economyRewardGrowth']))
+    exponent = int(settings.get('economyRewardExponentPercent', _ECONOMY_DEFAULTS['economyRewardExponentPercent'])) / 100.0
+    cap = int(settings.get('economyRewardMaxPerLevel', _ECONOMY_DEFAULTS['economyRewardMaxPerLevel']))
+    cap_text = f', cap {compact_number(cap)}' if cap > 0 else ', kein cap'
+    return f'{base} + {growth} * level^{exponent:.2f}{cap_text}'
 
 
 async def _maybe_await(value: Any) -> Any:
@@ -594,21 +676,21 @@ async def _call_credit_function(func: Any, payload: Dict[str, Any]) -> Tuple[boo
     return False, None, last_error or 'keine passende Signatur'
 
 
-def _shared_glitzer_api(api: Any) -> Any:
+def _shared_economy_api(api: Any) -> Any:
     shared = getattr(api, 'shared', None)
     if not isinstance(shared, dict):
         return None
-    for key in ('glitzerchip_manege.api', 'glitzerchip_manege', 'glitzerchips.api'):
+    for key in ('economy.api', 'economy'):
         candidate = shared.get(key)
         if candidate is not None:
             return candidate
     return None
 
 
-async def _credit_glitzerchips(api: Any, payload: Dict[str, Any]) -> Tuple[str, str]:
-    shared_api = _shared_glitzer_api(api)
+async def _credit_economy(api: Any, payload: Dict[str, Any]) -> Tuple[str, str]:
+    shared_api = _shared_economy_api(api)
     if shared_api is not None:
-        names = ('credit', 'add_balance', 'add_money', 'deposit', 'award', 'give', 'add_chips', 'grant')
+        names = ('credit', 'adjust_balance', 'add_money', 'deposit', 'award', 'give', 'grant')
         for name in names:
             func = shared_api.get(name) if isinstance(shared_api, dict) else getattr(shared_api, name, None)
             if callable(func):
@@ -618,13 +700,13 @@ async def _credit_glitzerchips(api: Any, payload: Dict[str, Any]) -> Tuple[str, 
                 if error:
                     return 'failed', f'shared:{name}:{error}'
     try:
-        await api.emit('glitzerchip_manege.credit', payload)
-        return 'emitted', 'emit:glitzerchip_manege.credit'
+        await api.emit('economy.credit', payload)
+        return 'emitted', 'emit:economy.credit'
     except Exception as exc:
         return 'failed', f'emit:{str(exc)[:180]}'
 
 
-async def _reserve_glitzer_rewards(api: Any, guild_id: int, user_id: int, movement: Dict[str, Any]) -> Dict[str, Any]:
+async def _reserve_economy_rewards(api: Any, guild_id: int, user_id: int, movement: Dict[str, Any]) -> Dict[str, Any]:
     old_level = int(movement.get('old_level', 0))
     new_level = int(movement.get('new_level', 0))
     if new_level <= old_level:
@@ -634,17 +716,17 @@ async def _reserve_glitzer_rewards(api: Any, guild_id: int, user_id: int, moveme
         state = await _storage_get(api)
         gs = _ensure_guild(state, guild_id)
         settings = _settings(gs)
-        currency = str(settings.get('glitzerchipCurrencyName', 'Glitzerchips'))
-        if not bool(settings.get('glitzerchipEnabled', True)):
+        currency = str(settings.get('economyCurrencyName', 'Glitzerchips'))
+        if not bool(settings.get('economyEnabled', True)):
             return {'enabled': False, 'amount': 0, 'currency': currency, 'entries': [], 'status': 'disabled'}
-        rewards = gs.setdefault('glitzerchip_rewards', {})
+        rewards = gs.setdefault('economy_rewards', {})
         entries = []
         total = 0
         for level in range(old_level + 1, new_level + 1):
-            amount = _glitzer_reward_for_level(settings, level)
+            amount = _economy_reward_for_level(settings, level)
             if amount <= 0:
                 continue
-            ref = f'level_manege:level_reward:{guild_id}:{user_id}:{level}'
+            ref = f'levels:economy_reward:{guild_id}:{user_id}:{level}'
             if ref in rewards:
                 continue
             entry = {
@@ -657,7 +739,7 @@ async def _reserve_glitzer_rewards(api: Any, guild_id: int, user_id: int, moveme
                 'status': 'pending',
                 'created_at_utc': _now_iso(),
                 'updated_at_utc': _now_iso(),
-                'source': 'level_manege'
+                'source': 'levels'
             }
             rewards[ref] = entry
             entries.append(entry)
@@ -667,13 +749,13 @@ async def _reserve_glitzer_rewards(api: Any, guild_id: int, user_id: int, moveme
         return {'enabled': True, 'amount': total, 'currency': currency, 'entries': entries, 'status': 'pending' if entries else 'already_rewarded'}
 
 
-async def _finalize_glitzer_rewards(api: Any, guild_id: int, entries: List[Dict[str, Any]], status: str, detail: str) -> None:
+async def _finalize_economy_rewards(api: Any, guild_id: int, entries: List[Dict[str, Any]], status: str, detail: str) -> None:
     if not entries:
         return
     async with _STATE_LOCK:
         state = await _storage_get(api)
         gs = _ensure_guild(state, guild_id)
-        rewards = gs.setdefault('glitzerchip_rewards', {})
+        rewards = gs.setdefault('economy_rewards', {})
         for entry in entries:
             ref = entry.get('reference_id')
             if ref in rewards:
@@ -683,8 +765,8 @@ async def _finalize_glitzer_rewards(api: Any, guild_id: int, entries: List[Dict[
         await _storage_set(api, state)
 
 
-async def _maybe_award_glitzerchips(api: Any, guild_id: int, user_id: int, movement: Dict[str, Any]) -> Dict[str, Any]:
-    reservation = await _reserve_glitzer_rewards(api, guild_id, user_id, movement)
+async def _maybe_award_economy(api: Any, guild_id: int, user_id: int, movement: Dict[str, Any]) -> Dict[str, Any]:
+    reservation = await _reserve_economy_rewards(api, guild_id, user_id, movement)
     entries = reservation.get('entries', [])
     amount = int(reservation.get('amount', 0))
     currency = str(reservation.get('currency', 'Glitzerchips'))
@@ -696,7 +778,7 @@ async def _maybe_award_glitzerchips(api: Any, guild_id: int, user_id: int, movem
         'amount': amount,
         'currency': currency,
         'reason': f'Level-Up Belohnung: Level {movement.get("old_level", 0)} -> {movement.get("new_level", 0)}',
-        'source': 'level_manege',
+        'source': 'levels',
         'reference_id': hashlib.sha256(('|'.join([str(e.get('reference_id')) for e in entries])).encode('utf-8')).hexdigest(),
         'metadata': {
             'old_level': int(movement.get('old_level', 0)),
@@ -704,12 +786,12 @@ async def _maybe_award_glitzerchips(api: Any, guild_id: int, user_id: int, movem
             'entries': entries
         }
     }
-    status, detail = await _credit_glitzerchips(api, payload)
-    await _finalize_glitzer_rewards(api, guild_id, entries, status, detail)
+    status, detail = await _credit_economy(api, payload)
+    await _finalize_economy_rewards(api, guild_id, entries, status, detail)
     reservation['status'] = status
     reservation['detail'] = detail
     try:
-        await api.emit('level_manege.glitzerchip_rewarded', dict(payload, status=status, detail=detail))
+        await api.emit('levels.economy_rewarded', dict(payload, status=status, detail=detail))
     except Exception:
         pass
     return reservation
@@ -724,15 +806,15 @@ async def _maybe_send_levelup(api: Any, ctx_or_message: Any, user_id: int, movem
         guild_id = int(getattr(guild, 'id', 0) or 0)
     reward = {'amount': 0, 'currency': 'Glitzerchips', 'status': 'none'}
     if guild_id:
-        reward = await _maybe_award_glitzerchips(api, int(guild_id), int(user_id), movement)
+        reward = await _maybe_award_economy(api, int(guild_id), int(user_id), movement)
     try:
-        await api.emit('level_manege.level_up', {
+        await api.emit('levels.level_up', {
             'guild_id': str(guild_id or ''),
             'user_id': str(user_id),
             'old_level': int(movement.get('old_level', 0)),
             'new_level': int(movement.get('new_level', 0)),
             'new_xp': int(movement.get('new_xp', 0)),
-            'glitzerchip_reward': reward
+            'economy_reward': reward
         })
     except Exception:
         pass
@@ -757,9 +839,9 @@ async def _maybe_send_levelup(api: Any, ctx_or_message: Any, user_id: int, movem
     if int(reward.get('amount', 0)) > 0 and bool(reward.get('enabled', True)):
         status = str(reward.get('status', ''))
         if status in {'credited', 'emitted'}:
-            text += f'\nGlitzerchip-Manege gekoppelt: **+{compact_number(int(reward.get("amount", 0)))} {reward.get("currency", "Glitzerchips")}**!'
+            text += f'\nEconomy gekoppelt: **+{compact_number(int(reward.get("amount", 0)))} {reward.get("currency", "Glitzerchips")}**!'
         elif status == 'failed':
-            text += f'\nGlitzerchip-Belohnung vorgemerkt, aber der Geld-Apparat hat gehustet. Kinger-Audit empfohlen.'
+            text += f'\nEconomy-Belohnung vorgemerkt, aber die Auszahlung ist fehlgeschlagen. Kinger-Audit empfohlen.'
     try:
         if channel is not None and hasattr(channel, 'send'):
             await channel.send(text)
@@ -773,6 +855,13 @@ async def _maybe_send_levelup(api: Any, ctx_or_message: Any, user_id: int, movem
 
 
 async def setup_plugin(api):
+    migrate = getattr(api, 'storage_migrate_from', None)
+    if callable(migrate):
+        try:
+            await migrate('level_manege', delete_old=True)
+        except Exception:
+            pass
+
     async def api_get_profile(guild_id: Any, user_id: Any, guild: Any = None) -> Dict[str, Any]:
         async with _STATE_LOCK:
             state = await _storage_get(api)
@@ -805,7 +894,7 @@ async def setup_plugin(api):
             movement = _apply_manual_xp(gs, int(guild_id), int(user_id), int(amount), str(reason)[:160], reference_id, int(actor_id or 0))
             await _storage_set(api, state)
         if movement.get('applied') and int(movement.get('new_level', 0)) > int(movement.get('old_level', 0)):
-            await _maybe_award_glitzerchips(api, int(guild_id), int(user_id), movement)
+            await _maybe_award_economy(api, int(guild_id), int(user_id), movement)
         return movement
 
     async def api_get_settings(guild_id: Any) -> Dict[str, Any]:
@@ -816,7 +905,7 @@ async def setup_plugin(api):
 
     try:
         if isinstance(getattr(api, 'shared', None), dict):
-            api.shared['level_manege.api'] = {
+            levels_api = {
                 'get_profile': api_get_profile,
                 'add_xp': api_add_xp,
                 'get_settings': api_get_settings,
@@ -824,6 +913,8 @@ async def setup_plugin(api):
                 'xp_for_next_level': xp_for_next_level,
                 'calculate_message_xp': calculate_message_xp
             }
+            api.shared['levels.api'] = levels_api
+            api.shared['levels'] = levels_api
     except Exception:
         pass
 
@@ -852,7 +943,7 @@ async def setup_plugin(api):
             await api.reply(ctx, 'Noch keine XP in dieser Manege! Schreib ein paar Nachrichten, dann klettert die Rangliste aus der Kiste.')
             return
         top = ranked[:10]
-        lines = ['**🏆 Level-Manege Rangliste — Top 10**']
+        lines = ['**Levels Rangliste - Top 10**']
         for idx, (uid, user, total) in enumerate(top, start=1):
             level, progress, needed = level_from_xp(total)
             name = _display_name_for(guild, uid, user)
@@ -930,13 +1021,14 @@ async def setup_plugin(api):
                 f'Manual-XP: `{int(user.get("manual_xp", 0))}`\n'
                 f'Gewertete Nachrichten: `{int(user.get("message_count", 0))}`\n'
                 f'Rank-Farbe: `{user.get("rank_color", _DEFAULT_COLOR)}`\n'
-                f'Glitzerchip-Link: `{bool(settings.get("glitzerchipEnabled", True))}`'
+                f'Economy-Link: `{bool(settings.get("economyEnabled", True))}`'
             )
             return
         username = user.get('last_seen_name') or str(target_id)
         if member is None and target_id == int(author.id):
             member = author
             username = getattr(author, 'display_name', getattr(author, 'name', username))
+        await _defer_slash_if_needed(ctx)
         avatar_bytes = await _fetch_avatar_bytes(member)
         color = user.get('rank_color', _DEFAULT_COLOR)
         png = _make_rank_card_png(username, rank, level, progress, needed, total, color, avatar_bytes)
@@ -973,10 +1065,13 @@ async def setup_plugin(api):
         await api.reply(ctx, f'Vorhang auf! Deine Rank-Karten-Glut leuchtet nun in `{color}`.')
 
     @api.command({
-        'names': ['level-money-info', 'level-glitzerchips', 'levelgeld'],
-        'description': 'Zeigt, wie Level-Ups mit Glitzerchips verbunden sind.',
+        'names': ['level-money-info', 'levelgeld'],
+        'description': 'Zeigt, wie Level-Ups mit der Economy verbunden sind.',
         'level': 'user',
-        'options': []
+        'options': [],
+        'examples': ['!level-money-info'],
+        'routing_when': 'Use when the user asks about level-up economy rewards, payout formula, or the level/economy connection.',
+        'routing_not_when': 'Do not use for a personal money balance; use konto.'
     })
     async def level_money_info_command(ctx, args):
         guild_id = _guild_id_from_ctx(ctx)
@@ -986,7 +1081,7 @@ async def setup_plugin(api):
             return
         ok, wait = _cooldown_ok('level-money-info', guild_id, int(author.id), 12)
         if not ok:
-            await api.reply(ctx, f'Der Glitzerchip-Rechner rasselt noch. Warte {wait}s.')
+            await api.reply(ctx, f'Der Economy-Rechner laeuft noch. Warte {wait}s.')
             return
         async with _STATE_LOCK:
             state = await _storage_get(api)
@@ -995,14 +1090,15 @@ async def setup_plugin(api):
             user = _ensure_user(gs, int(author.id))
             total = _total_xp(user)
         level, _progress, _needed = level_from_xp(total)
-        next_reward = _glitzer_reward_for_level(settings, level + 1)
-        enabled = bool(settings.get('glitzerchipEnabled', True))
-        currency = str(settings.get('glitzerchipCurrencyName', 'Glitzerchips'))
+        next_reward = _economy_reward_for_level(settings, level + 1)
+        enabled = bool(settings.get('economyEnabled', True))
+        currency = str(settings.get('economyCurrencyName', 'Glitzerchips'))
         await api.reply(ctx,
-            '**🎪 Level-Geld-Verbindung**\n'
+            '**Level-Economy-Verbindung**\n'
             f'Status: **{"aktiv" if enabled else "deaktiviert"}**\n'
             f'Dein Level: **{level}**\n'
-            f'Nächste Level-Up-Belohnung: **{compact_number(next_reward)} {currency}**\n'
+            f'Naechste Level-Up-Belohnung: **{compact_number(next_reward)} {currency}**\n'
+            f'Formel: `{_economy_reward_formula_text(settings)}`\n'
             'Hinweis: Belohnungen werden pro erreichtem Level nur einmal vorgemerkt, damit kein Doppel-Konfetti die Kasse sprengt.'
         )
 
@@ -1106,9 +1202,12 @@ async def setup_plugin(api):
 
     @api.command({
         'names': ['level-money', 'level-geld'],
-        'description': 'Admin-Konfiguration der Verbindung zwischen Level-Up und glitzerchip_manege.',
+        'description': 'Admin-Konfiguration der Verbindung zwischen Level-Up und economy.',
         'level': 'admin',
-        'options': [{'name': 'action', 'description': 'status, enable, disable, reward, currency, announce', 'type': 'string', 'required': False}]
+        'options': [{'name': 'action', 'description': 'status, enable, disable, reward, currency, announce', 'type': 'string', 'required': False}],
+        'examples': ['!level-money', '!level-money reward 25 8 135'],
+        'routing_when': 'Use for admin configuration of level-up economy payouts.',
+        'routing_not_when': 'Do not use for a user balance question; use konto.'
     })
     async def level_money_command(ctx, args):
         guild_id = _guild_id_from_ctx(ctx)
@@ -1127,28 +1226,30 @@ async def setup_plugin(api):
             gs = _ensure_guild(state, guild_id)
             settings = _settings(gs)
             if action in {'enable', 'on', 'aktivieren'}:
-                settings['glitzerchipEnabled'] = True
+                settings['economyEnabled'] = True
                 changed = True
             elif action in {'disable', 'off', 'deaktivieren'}:
-                settings['glitzerchipEnabled'] = False
+                settings['economyEnabled'] = False
                 changed = True
             elif action == 'reward':
                 if len(parts) < 4:
-                    await api.reply(ctx, 'Syntax: `/level-money reward <base> <perLevel> <maxPerLevel>` — z. B. `/level-money reward 25 5 500`.')
+                    await api.reply(ctx, 'Syntax: `/level-money reward <base> <growth> <exponentPercent> [maxPerLevel]` - z. B. `/level-money reward 25 8 135`.')
                     return
                 try:
                     base = max(0, int(parts[1]))
-                    per_level = max(0, int(parts[2]))
-                    max_per = max(0, int(parts[3]))
+                    growth = max(0, int(parts[2]))
+                    exponent_percent = max(100, int(parts[3]))
+                    max_per = max(0, int(parts[4])) if len(parts) >= 5 else int(settings.get('economyRewardMaxPerLevel', _ECONOMY_DEFAULTS['economyRewardMaxPerLevel']))
                 except Exception:
-                    await api.reply(ctx, 'Base, perLevel und maxPerLevel müssen ganze Zahlen sein.')
+                    await api.reply(ctx, 'Base, growth, exponentPercent und maxPerLevel muessen ganze Zahlen sein.')
                     return
-                if base > 1_000_000 or per_level > 1_000_000 or max_per > 10_000_000:
-                    await api.reply(ctx, 'Diese Werte sind zu groß. Keine Geldkanonen ohne Sicherheitsnetz!')
+                if base > 1_000_000 or growth > 1_000_000 or exponent_percent > 300 or max_per > 10_000_000:
+                    await api.reply(ctx, 'Diese Werte sind zu gross. Keine Geldkanonen ohne Sicherheitsnetz!')
                     return
-                settings['glitzerchipRewardBase'] = base
-                settings['glitzerchipRewardPerLevel'] = per_level
-                settings['glitzerchipRewardMaxPerLevel'] = max_per
+                settings['economyRewardBase'] = base
+                settings['economyRewardGrowth'] = growth
+                settings['economyRewardExponentPercent'] = exponent_percent
+                settings['economyRewardMaxPerLevel'] = max_per
                 changed = True
             elif action == 'currency':
                 if len(parts) < 2:
@@ -1158,26 +1259,26 @@ async def setup_plugin(api):
                 if not currency:
                     await api.reply(ctx, 'Der Währungsname darf nicht leer sein.')
                     return
-                settings['glitzerchipCurrencyName'] = currency
+                settings['economyCurrencyName'] = currency
                 changed = True
             elif action == 'announce':
                 if len(parts) < 2 or parts[1].lower() not in {'on', 'off', 'true', 'false', '1', '0', 'ja', 'nein'}:
                     await api.reply(ctx, 'Syntax: `/level-money announce on|off`')
                     return
-                settings['glitzerchipAnnounce'] = parts[1].lower() in {'on', 'true', '1', 'ja'}
+                settings['economyAnnounce'] = parts[1].lower() in {'on', 'true', '1', 'ja'}
                 changed = True
             elif action not in {'status', 'show'}:
                 await api.reply(ctx, 'Unbekannte Aktion. Nutze: `status`, `enable`, `disable`, `reward`, `currency`, `announce`.')
                 return
             if changed:
                 await _storage_set(api, state)
-            rewards_count = len(gs.get('glitzerchip_rewards', {}))
+            rewards_count = len(gs.get('economy_rewards', {}))
             status_text = (
-                '**🎪 Level-Geld-Kupplung**\n'
-                f'Status: **{"aktiv" if bool(settings.get("glitzerchipEnabled", True)) else "deaktiviert"}**\n'
-                f'Währung: **{settings.get("glitzerchipCurrencyName", "Glitzerchips")}**\n'
-                f'Belohnung/Formel: **base {settings.get("glitzerchipRewardBase")} + level × {settings.get("glitzerchipRewardPerLevel")}**, gedeckelt bei **{settings.get("glitzerchipRewardMaxPerLevel")}** pro Level\n'
-                f'Level-Up-Ansage ergänzt Geld: **{"ja" if bool(settings.get("glitzerchipAnnounce", True)) else "nein"}**\n'
+                '**Level-Economy-Kupplung**\n'
+                f'Status: **{"aktiv" if bool(settings.get("economyEnabled", True)) else "deaktiviert"}**\n'
+                f'Waehrung: **{settings.get("economyCurrencyName", "Glitzerchips")}**\n'
+                f'Belohnung/Formel: `{_economy_reward_formula_text(settings)}`\n'
+                f'Level-Up-Ansage ergaenzt Geld: **{"ja" if bool(settings.get("economyAnnounce", True)) else "nein"}**\n'
                 f'Vorgemerkte/ausgezahlte Reward-Einträge: **{rewards_count}**'
             )
         prefix = 'Gespeichert! ' if changed else ''
@@ -1187,7 +1288,10 @@ async def setup_plugin(api):
         'names': ['level-money-audit', 'level-geld-audit'],
         'description': 'Kinger-Audit der Level/Geld-Verbindung und letzten Auszahlungen.',
         'level': 'kinger',
-        'options': [{'name': 'user', 'description': 'Optionaler Nutzer.', 'type': 'user', 'required': False}]
+        'options': [{'name': 'user', 'description': 'Optionaler Nutzer.', 'type': 'user', 'required': False}],
+        'examples': ['!level-money-audit', '!level-money-audit @User'],
+        'routing_when': 'Use for kinger audit of level-up economy payouts and failed rewards.',
+        'routing_not_when': 'Do not use for the public economy leaderboard; use top.'
     })
     async def level_money_audit_command(ctx, args):
         guild_id = _guild_id_from_ctx(ctx)
@@ -1204,19 +1308,20 @@ async def setup_plugin(api):
             state = await _storage_get(api)
             gs = _ensure_guild(state, guild_id)
             settings = dict(_settings(gs))
-            rewards = list(gs.get('glitzerchip_rewards', {}).values())
+            rewards = list(gs.get('economy_rewards', {}).values())
             if target_id is not None:
                 rewards = [r for r in rewards if str(r.get('user_id')) == str(target_id)]
             rewards.sort(key=lambda r: str(r.get('updated_at_utc', r.get('created_at_utc', ''))), reverse=True)
             total_amount = sum(int(r.get('amount', 0)) for r in rewards if str(r.get('status')) in {'credited', 'emitted'})
             failed = sum(1 for r in rewards if str(r.get('status')) == 'failed')
-        shared_status = 'gefunden' if _shared_glitzer_api(api) is not None else 'nicht gefunden; Emit-Fallback aktiv'
+        shared_status = 'gefunden' if _shared_economy_api(api) is not None else 'nicht gefunden; Emit-Fallback aktiv'
         lines = [
-            '**🎪 S1 Audit: Level ↔ Glitzerchip-Manege**',
+            '**S1 Audit: Levels <-> Economy**',
             f'Shared API: **{shared_status}**',
-            f'Status: **{"aktiv" if bool(settings.get("glitzerchipEnabled", True)) else "deaktiviert"}**',
-            f'Währung: **{settings.get("glitzerchipCurrencyName", "Glitzerchips")}**',
-            f'Gezählte Reward-Einträge: **{len(rewards)}** | bestätigte/emittierte Summe: **{compact_number(total_amount)}** | failed: **{failed}**'
+            f'Status: **{"aktiv" if bool(settings.get("economyEnabled", True)) else "deaktiviert"}**',
+            f'Waehrung: **{settings.get("economyCurrencyName", "Glitzerchips")}**',
+            f'Formel: `{_economy_reward_formula_text(settings)}`',
+            f'Gezaehlte Reward-Eintraege: **{len(rewards)}** | bestaetigte/emittierte Summe: **{compact_number(total_amount)}** | failed: **{failed}**'
         ]
         if target_id is not None:
             profile = await api_get_profile(guild_id, target_id)
@@ -1393,17 +1498,17 @@ async def setup_plugin(api):
             if changed:
                 await _storage_set(api, state)
 
-    @api.on('level_manege.get_profile')
+    @api.on('levels.get_profile')
     async def on_get_profile(payload=None):
         payload = payload or {}
         return await api_get_profile(payload.get('guild_id'), payload.get('user_id'))
 
-    @api.on('level_manege.add_xp')
+    @api.on('levels.add_xp')
     async def on_add_xp(payload=None):
         payload = payload or {}
         return await api_add_xp(payload.get('guild_id'), payload.get('user_id'), payload.get('amount'), payload.get('reason', 'bus-add-xp'), payload.get('actor_id', 0))
 
-    @api.on('level_manege.get_settings')
+    @api.on('levels.get_settings')
     async def on_get_settings(payload=None):
         payload = payload or {}
         return await api_get_settings(payload.get('guild_id'))
