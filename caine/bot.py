@@ -852,6 +852,7 @@ async def build_command_routing_catalog(
                 "usage": f"{prefix}{command.name}",
                 "plugin": getattr(command, "caine_plugin_name", None) or "core",
                 "options": command_routing_options(spec),
+                "examples": command_examples(spec),
                 "routing": command_routing_hints(command, spec),
             }
         )
@@ -870,6 +871,12 @@ def command_routing_options(spec: CommandSpec | None) -> list[dict[str, object]]
         }
         for option in spec.options
     ]
+
+
+def command_examples(spec: CommandSpec | None) -> list[str]:
+    if not isinstance(spec, CommandSpec):
+        return []
+    return list(spec.examples)
 
 
 def command_routing_hints(command: commands.Command, spec: CommandSpec | None) -> dict[str, object]:
@@ -992,7 +999,12 @@ def format_command_help_line(
     spec = getattr(command, "caine_spec", None)
     level = f" {command_level_label(getattr(spec, 'level', None))}" if show_level_labels else ""
     description = getattr(spec, "description", None) or command.help or command.short_doc or "ohne Beschreibung"
-    return f"- `{prefix}{command.name}`{level}{alias_text}: {description}"
+    line = f"- `{prefix}{command.name}`{level}{alias_text}: {description}"
+    examples = command_examples(spec)
+    if examples:
+        example_text = ", ".join(f"`{example}`" for example in examples)
+        line += f"\n  Beispiel: {example_text}"
+    return line
 
 
 def format_commands_by_level(

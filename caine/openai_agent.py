@@ -910,6 +910,7 @@ class OpenAIAgent:
                   "level": "user",
                   "slash": true,
                   "options": [],
+                  "examples": ["!command example"],
                   "routing": {
                     "priority": 50,
                     "when": "Use when ...",
@@ -924,6 +925,10 @@ class OpenAIAgent:
                   Option objects are {"name": "...", "description": "...",
                   "type": "string|integer|number|boolean|user|channel|role|attachment",
                   "required": true|false}.
+                - Every command must include 1-3 examples in "examples".
+                  Examples must be complete visible prefix invocations like
+                  "!rank", "!rank @User", or "!set-rank-color #009FA1" so
+                  !help <pluginname> can show users how to run the command.
                 - Every command must include routing metadata. Use
                   routing.priority from 0-100, where higher means more specific
                   or safer to run when several commands match. routing.when
@@ -976,6 +981,7 @@ class OpenAIAgent:
               "level": "user",
               "slash": true,
               "options": [],
+              "examples": ["!command example"],
               "routing": {
                 "priority": 50,
                 "when": "Use when ...",
@@ -993,6 +999,10 @@ class OpenAIAgent:
               Option objects are {"name": "...", "description": "...",
               "type": "string|integer|number|boolean|user|channel|role|attachment",
               "required": true|false}.
+            - Every command must include 1-3 examples in "examples". Examples
+              must be complete visible prefix invocations like "!rank",
+              "!rank @User", or "!set-rank-color #009FA1" so
+              !help <pluginname> can show users how to run the command.
             - Every command must include routing metadata. Use
               routing.priority from 0-100, where higher means more specific or
               safer to run when several commands match. routing.when must
@@ -1062,6 +1072,9 @@ class OpenAIAgent:
               block plus the new lines inserted.
             - Preserve the existing PLUGIN name unless the user explicitly asks to rename it.
             - Preserve existing commands and behavior unless the requested change requires edits.
+            - When adding or editing @api.command metadata, include or preserve
+              "examples": ["!command example"]. Use 1-3 complete visible prefix
+              invocations per command so !help can show users how to run it.
             - When adding or editing @api.command metadata, include or preserve
               routing metadata: {{"priority": 0-100, "when": "...",
               "not_when": "..."}}. Explain when to use the command, when not to

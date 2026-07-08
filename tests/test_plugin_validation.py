@@ -93,6 +93,7 @@ async def setup_plugin(api):
         "names": ["konto"],
         "description": "Shows your account.",
         "level": "user",
+        "examples": ["!konto"],
         "routing": {
             "priority": 80,
             "when": "Use for account balance questions.",

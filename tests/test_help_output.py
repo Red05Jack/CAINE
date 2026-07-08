@@ -13,7 +13,11 @@ PLUGIN = {"name": "hello_plugin", "description": "Begruesst Nutzer."}
 
 
 async def setup_plugin(api):
-    @api.command("hello", description="Begruesst dich.")
+    @api.command({
+        "names": ["hello"],
+        "description": "Begruesst dich.",
+        "examples": ["!hello"]
+    })
     async def hello(ctx, args):
         await api.reply(ctx, "Hallo.")
 
@@ -102,6 +106,7 @@ def test_plugin_help_shows_exact_plugin_commands(tmp_path):
     assert "Plugin `hello_plugin`" in text
     assert "Commands:" in text
     assert "`!hello`: Begruesst dich." in text
+    assert "Beispiel: `!hello`" in text
     assert "`!adminhello` [S2]" not in text
     assert "`!kinghello` [S1]" not in text
 

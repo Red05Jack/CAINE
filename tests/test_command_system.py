@@ -93,6 +93,18 @@ def test_command_object_normalizes_routing_metadata():
     assert spec.routing_not_when == "Do not use for general chat."
 
 
+def test_command_object_normalizes_examples():
+    spec = command_spec(
+        {
+            "names": ["rank"],
+            "description": "Shows rank.",
+            "examples": ["  !rank   @User  ", "!rank @User", "!rank @User debug", "!rank me"],
+        }
+    )
+
+    assert spec.examples == ("!rank @User", "!rank @User debug", "!rank me")
+
+
 def test_command_object_parses_slash_enabled_flag():
     spec = command_spec(
         {

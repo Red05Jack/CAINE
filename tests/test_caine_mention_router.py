@@ -200,6 +200,7 @@ def test_routing_catalog_includes_options_and_routing_hints():
             "required": True,
         }
     ]
+    assert ask["examples"] == []
     assert ask["routing"]["priority"] == 80
     assert "broad questions" in ask["routing"]["use_when"]
     assert help_command["routing"]["priority"] == 35

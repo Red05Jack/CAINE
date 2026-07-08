@@ -45,6 +45,7 @@ class CommandSpec:
     level: CommandLevel = CommandLevel.USER
     group: str = "Plugins"
     options: tuple[CommandOption, ...] = ()
+    examples: tuple[str, ...] = ()
     slash_enabled: bool | None = None
     routing_priority: int = DEFAULT_ROUTING_PRIORITY
     routing_when: str = ""
@@ -69,6 +70,7 @@ def command_spec(
     aliases: tuple[str, ...] | list[str] = (),
     group: str = "Plugins",
     options: tuple[CommandOption, ...] | list[CommandOption | dict[str, Any]] = (),
+    examples: tuple[str, ...] | list[str] | str = (),
     slash_enabled: bool | None = None,
     routing_priority: int | str = DEFAULT_ROUTING_PRIORITY,
     routing_when: str = "",
@@ -87,6 +89,7 @@ def command_spec(
         level = name_or_object.get("level", level)
         group = str(name_or_object.get("group", group)).strip() or group
         options = name_or_object.get("options", options)
+        examples = name_or_object.get("examples", name_or_object.get("example", examples))
         routing = name_or_object.get("routing", {})
         if not isinstance(routing, dict):
             routing = {}
@@ -126,6 +129,7 @@ def command_spec(
         level=normalized_level,
         group=group,
         options=normalize_command_options(options),
+        examples=normalize_command_examples(examples),
         slash_enabled=slash_enabled,
         routing_priority=normalize_routing_priority(routing_priority),
         routing_when=normalize_routing_text(routing_when),
@@ -174,6 +178,21 @@ def normalize_command_options(
             )
         )
     return tuple(sorted(result, key=lambda item: not item.required))
+
+
+def normalize_command_examples(examples: tuple[str, ...] | list[str] | str) -> tuple[str, ...]:
+    values = [examples] if isinstance(examples, str) else list(examples or ())
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        example = re.sub(r"\s+", " ", str(value or "")).strip()
+        if not example or example in seen:
+            continue
+        seen.add(example)
+        result.append(example[:140])
+        if len(result) >= 3:
+            break
+    return tuple(result)
 
 
 def normalize_option_type(value: str) -> str:
